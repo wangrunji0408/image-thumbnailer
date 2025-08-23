@@ -4,6 +4,7 @@ class Reader {
     private let readAt: (UInt64, UInt32) async throws -> Data
     private var buffers: [(UInt64, Data)] = []
     private var byteOrder: ByteOrder = .bigEndian
+    private let minReadSize: UInt32 = 4096
 
     init(readAt: @escaping (UInt64, UInt32) async throws -> Data) {
         self.readAt = readAt
@@ -22,13 +23,15 @@ class Reader {
                     in: Int(offset - bufferOffset)..<Int(offset - bufferOffset + UInt64(length)))
             }
         }
-        let data = try await readAt(offset, length)
+        let readLength = max(length, minReadSize)
+        let data = try await readAt(offset, readLength)
         if data.count < Int(length) {
             throw NSError(
                 domain: "ReaderError", code: 1,
                 userInfo: [NSLocalizedDescriptionKey: "Read length exceeds available data"])
         }
-        return data
+        buffers.append((offset, data))
+        return data.prefix(Int(length))
     }
 
     func prefetch(at offset: UInt64, length: UInt32) async throws {

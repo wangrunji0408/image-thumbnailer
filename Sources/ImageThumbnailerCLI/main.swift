@@ -41,13 +41,6 @@ struct ImageThumbnailCLI: AsyncParsableCommand {
                 readBytes += Int(length)
                 try fileHandle.seek(toOffset: offset)
                 let data = fileHandle.readData(ofLength: Int(length))
-                if data.count < Int(length) {
-                    logger.error("fail to read data at offset \(offset), length \(length)")
-                    throw NSError(
-                        domain: "ImageError", code: 1,
-                        userInfo: [NSLocalizedDescriptionKey: "fail to read file data"]
-                    )
-                }
                 logger.debug(
                     "read data: offset=\(offset), length=\(length), data=\(data.count) bytes")
                 return data

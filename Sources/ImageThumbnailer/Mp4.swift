@@ -27,8 +27,11 @@ public class Mp4Reader: ImageReader {
             if let embeddedData = info.embeddedData {
                 estimatedSize = UInt32(embeddedData.count)
                 format = detectImageFormat(data: embeddedData)
+            } else if let thumbnailSize = info.thumbnailSize {
+                estimatedSize = thumbnailSize
+                format = "jpeg"  // Thumbnails in MP4 are typically JPEG
             } else if let frameSize = info.frameSize {
-                estimatedSize = frameSize * 2  // Estimate HEIC will be roughly 2x HEVC frame size
+                estimatedSize = frameSize
                 format = "heic"
             } else {
                 estimatedSize = 0
@@ -59,6 +62,11 @@ public class Mp4Reader: ImageReader {
         // Return embedded thumbnail data directly
         if let embeddedData = info.embeddedData {
             return embeddedData
+        }
+
+        // Load thumbnail data lazily
+        if let thumbnailOffset = info.thumbnailOffset, let thumbnailSize = info.thumbnailSize {
+            return try await reader.read(at: thumbnailOffset, length: thumbnailSize)
         }
 
         // Extract and convert first frame to HEIC
@@ -95,9 +103,6 @@ public class Mp4Reader: ImageReader {
     }
 
     private func loadMetadata() async throws {
-        // Read file header with prefetch for better performance
-        try await reader.prefetch(at: 0, length: 2048)
-
         // Validate MP4 format
         guard try await validateMp4Format(reader: reader) else {
             logger.error("Invalid MP4 format")
@@ -110,10 +115,7 @@ public class Mp4Reader: ImageReader {
             throw ImageReaderError.invalidData
         }
 
-        // Prefetch moov box data for efficient parsing
-        try await reader.prefetch(at: moovOffset + 8, length: moovSize - 8)
-
-        // Parse everything in one pass to avoid redundant operations
+        // Parse moov box structure without reading entire box
         let parsedInfo = try await parseAllMoovInfo(
             moovOffset: moovOffset + 8, moovSize: moovSize - 8)
 
@@ -429,6 +431,8 @@ public class Mp4Reader: ImageReader {
             height: videoTrackInfo.height,
             rotation: videoTrackInfo.rotation,
             embeddedData: nil,
+            thumbnailOffset: nil,
+            thumbnailSize: nil,
             frameOffset: firstFrameOffset,
             frameSize: frameSize,
             videoTrackInfo: videoTrackInfo
@@ -724,7 +728,8 @@ public class Mp4Reader: ImageReader {
     private func findBox(offset: UInt64, length: UInt32, boxType: String) async throws -> BoxInfo? {
         let endOffset = offset + UInt64(length)
         logger.debug(
-            "Searching for box type '\(boxType, privacy: .public)' in range \(offset)-\(endOffset)")
+            "Searching for box type '\(boxType, privacy: .public)' at offset=\(offset), length=\(length)"
+        )
         var currentOffset: UInt64 = offset
         var boxCount = 0
 
@@ -856,14 +861,19 @@ public class Mp4Reader: ImageReader {
                 // data box contains the actual image
                 let imageDataOffset = offset + 16
                 let imageDataSize = boxSize - 16
-                let imageData = try await reader.read(at: imageDataOffset, length: imageDataSize)
-                if isJpegData(imageData) {
-                    let (width, height) = extractJpegDimensions(data: imageData)
+
+                // Only read first few bytes to detect format and dimensions
+                let headerData = try await reader.read(
+                    at: imageDataOffset, length: min(256, imageDataSize))
+                if isJpegData(headerData) {
+                    let (width, height) = extractJpegDimensions(data: headerData)
                     return Mp4ImageInfo(
                         width: width,
                         height: height,
                         rotation: rotation,
-                        embeddedData: imageData,
+                        embeddedData: nil,
+                        thumbnailOffset: imageDataOffset,
+                        thumbnailSize: imageDataSize,
                         frameOffset: nil,
                         frameSize: nil,
                         videoTrackInfo: nil
@@ -932,41 +942,46 @@ public class Mp4Reader: ImageReader {
     {
         logger.debug("Extracting thumbnail from box, size: \(boxSize)")
 
-        // Read the box data to search for JPEG markers
-        let boxData = try await reader.read(at: boxOffset, length: boxSize)
+        // Read initial portion to find JPEG markers
+        let chunkSize: UInt32 = min(1024, boxSize)
+        let headerData = try await reader.read(at: boxOffset, length: chunkSize)
 
         // 查找JPEG开始标记
-        for i in 0..<boxData.count - 1 {
-            if boxData[i] == 0xFF && boxData[i + 1] == 0xD8 {
+        for i in 0..<headerData.count - 1 {
+            if headerData[i] == 0xFF && headerData[i + 1] == 0xD8 {
                 logger.debug("Found JPEG start marker at offset \(i)")
-                let jpegData = boxData.subdata(in: i..<boxData.count)
+                let jpegStartOffset = boxOffset + UInt64(i)
+                let maxJpegSize = boxSize - UInt32(i)
 
-                // 查找JPEG结束标记
-                for j in stride(from: jpegData.count - 1, to: 0, by: -1) {
-                    if jpegData[j - 1] == 0xFF && jpegData[j] == 0xD9 {
-                        let finalJpegData = jpegData.subdata(in: 0..<j + 1)
-                        logger.debug("Found complete JPEG data, size: \(finalJpegData.count)")
-                        let (width, height) = extractJpegDimensions(data: finalJpegData)
-                        return Mp4ImageInfo(
-                            width: width,
-                            height: height,
-                            rotation: rotation,
-                            embeddedData: finalJpegData,
-                            frameOffset: nil,
-                            frameSize: nil,
-                            videoTrackInfo: nil
-                        )
+                // Try to find JPEG end marker by reading in chunks
+                var jpegSize = maxJpegSize
+                if maxJpegSize > 1024 {
+                    // Read last chunk to look for end marker
+                    let endChunkSize = min(1024, maxJpegSize)
+                    let endOffset = jpegStartOffset + UInt64(maxJpegSize) - UInt64(endChunkSize)
+                    let endData = try await reader.read(at: endOffset, length: endChunkSize)
+
+                    for j in stride(from: endData.count - 1, to: 0, by: -1) {
+                        if endData[j - 1] == 0xFF && endData[j] == 0xD9 {
+                            jpegSize = UInt32(endOffset - jpegStartOffset) + UInt32(j) + 1
+                            logger.debug("Found JPEG end marker, final size: \(jpegSize)")
+                            break
+                        }
                     }
                 }
 
-                // 如果没有找到结束标记，使用剩余数据
-                logger.debug("No JPEG end marker found, using remaining data")
-                let (width, height) = extractJpegDimensions(data: jpegData)
+                // Read a small portion to get dimensions
+                let dimensionData = try await reader.read(
+                    at: jpegStartOffset, length: min(256, jpegSize))
+                let (width, height) = extractJpegDimensions(data: dimensionData)
+
                 return Mp4ImageInfo(
                     width: width,
                     height: height,
                     rotation: rotation,
-                    embeddedData: jpegData,
+                    embeddedData: nil,
+                    thumbnailOffset: jpegStartOffset,
+                    thumbnailSize: jpegSize,
                     frameOffset: nil,
                     frameSize: nil,
                     videoTrackInfo: nil
@@ -986,6 +1001,9 @@ private struct Mp4ImageInfo {
     let rotation: Double?
     // For embedded thumbnails
     let embeddedData: Data?
+    // For lazy-loaded thumbnails
+    let thumbnailOffset: UInt64?
+    let thumbnailSize: UInt32?
     // For first frame extraction
     let frameOffset: UInt64?
     let frameSize: UInt32?
@@ -1013,7 +1031,6 @@ private func findMoovBox(reader: Reader) async throws -> (UInt64, UInt32)? {
     var offset: UInt64 = 0
 
     while true {
-        try await reader.prefetch(at: offset, length: 16)
         // Ensure we have header data
         let boxSize32 = try await reader.readUInt32(at: offset)
         let boxType = try await reader.readString(at: offset + 4, length: 4)
