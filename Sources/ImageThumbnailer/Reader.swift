@@ -75,6 +75,15 @@ class Reader {
         }
     }
 
+    func readInt32(at offset: UInt64, byteOrder: ByteOrder? = nil) async throws -> Int32 {
+        let data = try await read(at: offset, length: 4)
+        if byteOrder ?? self.byteOrder == .bigEndian {
+            return data.withUnsafeBytes { $0.load(as: Int32.self).bigEndian }
+        } else {
+            return data.withUnsafeBytes { $0.load(as: Int32.self) }
+        }
+    }
+
     func readString(at offset: UInt64, length: UInt32) async throws -> String {
         return try String(data: await read(at: offset, length: length), encoding: .ascii) ?? ""
     }
