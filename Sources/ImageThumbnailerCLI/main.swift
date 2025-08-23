@@ -31,7 +31,7 @@ struct ImageThumbnailCLI: AsyncParsableCommand {
             let fileHandle = try FileHandle(forReadingFrom: fileURL)
             defer { fileHandle.closeFile() }
 
-            logger.info("extracting thumbnail from \(imagePath)...")
+            print("extracting thumbnail from \(imagePath)...")
 
             // create read function
             var readCount = 0
@@ -74,22 +74,23 @@ struct ImageThumbnailCLI: AsyncParsableCommand {
             }
 
             let metadata = try await reader.getMetadata()
-            logger.info("metadata: size: \(metadata.width)x\(metadata.height)")
+            print("metadata:")
+            print("  size: \(metadata.width)x\(metadata.height)")
             if let duration = metadata.duration {
-                logger.info("duration: \(duration) seconds")
+                print("  duration: \(String(format: "%.2f", duration)) seconds")
             }
 
             let thumbnailList = try await reader.getThumbnailList()
             if thumbnailList.isEmpty {
-                logger.error("no thumbnail found in file")
+                print("no thumbnail found in file")
                 return
             }
 
             // 显示所有找到的缩略图
-            logger.info("found \(thumbnailList.count) thumbnails:")
+            print("found \(thumbnailList.count) thumbnails:")
             for (i, info) in thumbnailList.enumerated() {
-                logger.info(
-                    "  [\(i)] format: \(info.format, privacy: .public), size: \(info.size) bytes, dimensions: \(info.width ?? 0)x\(info.height ?? 0), rotation: \(info.rotation ?? 0)"
+                print(
+                    "  [\(i)] format: \(info.format), size: \(info.size) bytes, dimensions: \(info.width ?? 0)x\(info.height ?? 0), rotation: \(info.rotation ?? 0)"
                 )
             }
 
@@ -105,13 +106,13 @@ struct ImageThumbnailCLI: AsyncParsableCommand {
             }
             let info = thumbnailList[index]
             let thumbnail = try await reader.getThumbnail(at: index)
-            logger.info("selected thumbnail index: \(index)")
+            print("selected thumbnail index: \(index)")
 
             // save thumbnail data
             let outputURL = URL(fileURLWithPath: outputPath ?? "thumbnail.\(info.format)")
             try thumbnail.write(to: outputURL)
-            logger.info("thumbnail saved to: \(outputURL.path)")
-            logger.info("read count: \(readCount), bytes: \(readBytes)")
+            print("thumbnail saved to: \(outputURL.path)")
+            print("read count: \(readCount), bytes: \(readBytes)")
         } catch {
             logger.error("\(error.localizedDescription)")
         }
