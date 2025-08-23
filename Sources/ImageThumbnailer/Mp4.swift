@@ -20,27 +20,9 @@ public class Mp4Reader: ImageReader {
         }
 
         return imageInfos?.map { info in
-            // For thumbnail list, we estimate size based on available information
-            let estimatedSize: UInt32
-            let format: String
-
-            if let embeddedData = info.embeddedData {
-                estimatedSize = UInt32(embeddedData.count)
-                format = detectImageFormat(data: embeddedData)
-            } else if let thumbnailSize = info.thumbnailSize {
-                estimatedSize = thumbnailSize
-                format = "jpeg"  // Thumbnails in MP4 are typically JPEG
-            } else if let frameSize = info.frameSize {
-                estimatedSize = frameSize
-                format = "heic"
-            } else {
-                estimatedSize = 0
-                format = "unknown"
-            }
-
             return ThumbnailInfo(
-                size: estimatedSize,
-                format: format,
+                size: info.frameSize ?? 0,
+                format: "heic",
                 width: info.width,
                 height: info.height,
                 rotation: info.rotation.map { Int($0) }
@@ -58,16 +40,6 @@ public class Mp4Reader: ImageReader {
         }
 
         let info = infos[index]
-
-        // Return embedded thumbnail data directly
-        if let embeddedData = info.embeddedData {
-            return embeddedData
-        }
-
-        // Load thumbnail data lazily
-        if let thumbnailOffset = info.thumbnailOffset, let thumbnailSize = info.thumbnailSize {
-            return try await reader.read(at: thumbnailOffset, length: thumbnailSize)
-        }
 
         // Extract and convert first frame to HEIC
         guard let frameOffset = info.frameOffset,
@@ -119,12 +91,12 @@ public class Mp4Reader: ImageReader {
         let parsedInfo = try await parseAllMoovInfo(
             moovOffset: moovOffset + 8, moovSize: moovSize - 8)
 
-        // If no thumbnails found, create placeholder for first frame extraction
-        var finalThumbnails = parsedInfo.thumbnails
-        if parsedInfo.thumbnails.isEmpty && parsedInfo.videoTrackInfo != nil {
-            logger.info("No embedded thumbnails found, preparing first frame extraction info")
+        // Create first frame extraction info
+        var finalThumbnails: [Mp4ImageInfo] = []
+        if let videoTrackInfo = parsedInfo.videoTrackInfo {
+            logger.info("Preparing first frame extraction info")
             if let firstFrameInfo = try await prepareFirstFrameInfo(
-                videoTrackInfo: parsedInfo.videoTrackInfo!)
+                videoTrackInfo: videoTrackInfo)
             {
                 finalThumbnails = [firstFrameInfo]
                 logger.info("Successfully prepared first frame extraction info")
@@ -143,9 +115,8 @@ public class Mp4Reader: ImageReader {
         }
     }
 
-    // Consolidated parsing structure to avoid redundant operations
+    // Simplified parsing structure for first frame extraction only
     private struct ParsedMoovInfo {
-        let thumbnails: [Mp4ImageInfo]
         let trackDimensions: (width: UInt32, height: UInt32)?
         let duration: Double?
         let videoTrackInfo: VideoTrackInfo?
@@ -155,16 +126,14 @@ public class Mp4Reader: ImageReader {
         -> ParsedMoovInfo
     {
         logger.debug("Parsing moov box, size: \(moovSize)")
-        var imageInfos: [Mp4ImageInfo] = []
         var trackDimensions: (width: UInt32, height: UInt32)?
-        var rotation: Double?
         var videoTrackInfo: VideoTrackInfo?
         let moovEndOffset = moovOffset + UInt64(moovSize)
 
         // Parse duration from mvhd box
         let duration = try await parseDuration(moovOffset: moovOffset, moovEndOffset: moovEndOffset)
 
-        // Single pass through all tracks to find video track info and dimensions
+        // Find first video track for first frame extraction
         var offset: UInt64 = moovOffset
         var trackIndex = 0
 
@@ -182,16 +151,15 @@ public class Mp4Reader: ImageReader {
                 let trakOffset = offset + 8
                 let trakEndOffset = offset + UInt64(boxSize)
 
-                // Parse track info in one pass
+                // Parse track info for video tracks only
                 if let trackInfo = try await parseTrackInfoComplete(
                     trakOffset: trakOffset, trakEndOffset: trakEndOffset, trackIndex: trackIndex)
                 {
-                    // Use first video track for dimensions and rotation
-                    if trackDimensions == nil && trackInfo.isVideo {
+                    // Use first video track for dimensions and first frame extraction
+                    if trackInfo.isVideo && videoTrackInfo == nil {
                         trackDimensions = (trackInfo.width, trackInfo.height)
-                        rotation = trackInfo.rotation
 
-                        // Create video track info for first frame extraction if needed
+                        // Create video track info for first frame extraction
                         if trackInfo.stblOffset != 0, let hevcConfig = trackInfo.hevcConfig {
                             videoTrackInfo = VideoTrackInfo(
                                 width: trackInfo.width,
@@ -201,6 +169,7 @@ public class Mp4Reader: ImageReader {
                                 hevcConfig: hevcConfig,
                                 rotation: trackInfo.rotation
                             )
+                            break
                         }
                     }
                 }
@@ -209,33 +178,7 @@ public class Mp4Reader: ImageReader {
             offset += UInt64(boxSize)
         }
 
-        // Parse thumbnails from udta box
-        if let udtaBox = try await findBox(offset: moovOffset, length: moovSize, boxType: "udta") {
-            logger.debug("Found udta box, size: \(udtaBox.size)")
-
-            if let metaBox = try await findBox(
-                offset: udtaBox.offset, length: udtaBox.size, boxType: "meta")
-            {
-                logger.debug("Found meta box in udta, size: \(metaBox.size)")
-
-                if let ilstBox = try await findBox(
-                    offset: metaBox.offset, length: metaBox.size, boxType: "ilst")
-                {
-                    logger.debug("Found ilst box in udta/meta, size: \(ilstBox.size)")
-                    let ilstThumbnails = try await parseIlstBox(
-                        ilstOffset: ilstBox.offset, ilstSize: ilstBox.size, rotation: rotation)
-                    imageInfos.append(contentsOf: ilstThumbnails)
-                }
-            } else {
-                logger.debug("No meta box found in udta, searching for thumbnails directly")
-                let udtaThumbnails = try await parseUdtaForThumbnails(
-                    udtaOffset: udtaBox.offset, udtaSize: udtaBox.size, rotation: rotation)
-                imageInfos.append(contentsOf: udtaThumbnails)
-            }
-        }
-
         return ParsedMoovInfo(
-            thumbnails: imageInfos,
             trackDimensions: trackDimensions,
             duration: duration,
             videoTrackInfo: videoTrackInfo
@@ -430,9 +373,6 @@ public class Mp4Reader: ImageReader {
             width: videoTrackInfo.width,
             height: videoTrackInfo.height,
             rotation: videoTrackInfo.rotation,
-            embeddedData: nil,
-            thumbnailOffset: nil,
-            thumbnailSize: nil,
             frameOffset: firstFrameOffset,
             frameSize: frameSize,
             videoTrackInfo: videoTrackInfo
@@ -780,217 +720,6 @@ public class Mp4Reader: ImageReader {
         return nil
     }
 
-    private func parseIlstBox(ilstOffset: UInt64, ilstSize: UInt32, rotation: Double?) async throws
-        -> [Mp4ImageInfo]
-    {
-        logger.debug("Parsing ilst box, size: \(ilstSize)")
-        var imageInfos: [Mp4ImageInfo] = []
-        var offset: UInt64 = ilstOffset
-        var itemCount = 0
-        let ilstEndOffset = ilstOffset + UInt64(ilstSize)
-
-        while offset + 8 <= ilstEndOffset {
-            let itemSize = try await reader.readUInt32(at: offset)
-
-            guard itemSize > 8, offset + UInt64(itemSize) <= ilstEndOffset else {
-                offset += 8
-                continue
-            }
-
-            let itemName = try await reader.readString(at: offset + 4, length: 4)
-            let itemDataOffset = offset + 8
-            let itemDataSize = itemSize - 8
-
-            itemCount += 1
-            if itemCount <= 10 {  // 只显示前10个item
-                logger.debug(
-                    "Item #\(itemCount): name='\(itemName, privacy: .public)', size=\(itemSize), offset=\(offset)"
-                )
-            }
-
-            if itemName == "covr" {
-                // Cover Art
-                logger.debug("Processing Cover Art item")
-                if let imageData = try await extractImageFromItem(
-                    itemOffset: itemDataOffset, itemSize: itemDataSize, rotation: rotation)
-                {
-                    imageInfos.append(imageData)
-                    logger.debug(
-                        "Added Cover Art: \(imageData.width ?? 0)x\(imageData.height ?? 0)")
-                }
-            } else if itemName == "snal" {
-                // PreviewImage
-                logger.debug("Processing PreviewImage item")
-                if let imageData = try await extractImageFromItem(
-                    itemOffset: itemDataOffset, itemSize: itemDataSize, rotation: rotation)
-                {
-                    imageInfos.append(imageData)
-                    logger.debug(
-                        "Added PreviewImage: \(imageData.width ?? 0)x\(imageData.height ?? 0)")
-                }
-            } else if itemName == "tnal" {
-                // ThumbnailImage
-                logger.debug("Processing ThumbnailImage item")
-                if let imageData = try await extractImageFromItem(
-                    itemOffset: itemDataOffset, itemSize: itemDataSize, rotation: rotation)
-                {
-                    imageInfos.append(imageData)
-                    logger.debug(
-                        "Added ThumbnailImage: \(imageData.width ?? 0)x\(imageData.height ?? 0)")
-                }
-            }
-
-            offset += UInt64(itemSize)
-        }
-
-        return imageInfos
-    }
-
-    private func extractImageFromItem(itemOffset: UInt64, itemSize: UInt32, rotation: Double?)
-        async throws -> Mp4ImageInfo?
-    {
-        logger.debug("extractImageFromItem: size=\(itemSize)")
-        var offset: UInt64 = itemOffset
-        let itemEndOffset = itemOffset + UInt64(itemSize)
-
-        while offset + 8 <= itemEndOffset {
-            let boxSize = try await reader.readUInt32(at: offset)
-            let boxType = try await reader.readString(at: offset + 4, length: 4)
-
-            if boxType == "data", boxSize > 16 {
-                // data box contains the actual image
-                let imageDataOffset = offset + 16
-                let imageDataSize = boxSize - 16
-
-                // Only read first few bytes to detect format and dimensions
-                let headerData = try await reader.read(
-                    at: imageDataOffset, length: min(256, imageDataSize))
-                if isJpegData(headerData) {
-                    let (width, height) = extractJpegDimensions(data: headerData)
-                    return Mp4ImageInfo(
-                        width: width,
-                        height: height,
-                        rotation: rotation,
-                        embeddedData: nil,
-                        thumbnailOffset: imageDataOffset,
-                        thumbnailSize: imageDataSize,
-                        frameOffset: nil,
-                        frameSize: nil,
-                        videoTrackInfo: nil
-                    )
-                }
-            }
-
-            if boxSize <= 8 {
-                offset += 8
-            } else {
-                offset += UInt64(boxSize)
-            }
-        }
-
-        return nil
-    }
-
-    private func parseUdtaForThumbnails(udtaOffset: UInt64, udtaSize: UInt32, rotation: Double?)
-        async throws -> [Mp4ImageInfo]
-    {
-        logger.debug("Parsing udta box for thumbnails, size: \(udtaSize)")
-        var imageInfos: [Mp4ImageInfo] = []
-        var offset: UInt64 = udtaOffset
-        var boxCount = 0
-        let udtaEndOffset = udtaOffset + UInt64(udtaSize)
-
-        while offset + 8 <= udtaEndOffset {
-            let boxSize = try await reader.readUInt32(at: offset)
-            let boxType = try await reader.readString(at: offset + 4, length: 4)
-
-            boxCount += 1
-            logger.debug(
-                "Box #\(boxCount): type='\(boxType, privacy: .public)', size=\(boxSize), offset=\(offset)"
-            )
-
-            // 检查是否是缩略图相关的box
-            if boxType == "thmb" {
-                let boxDataOffset = offset + 8
-                let boxDataSize = boxSize - 8
-                if let thumbnailData = try await extractThumbnailFromBox(
-                    boxOffset: boxDataOffset, boxSize: boxDataSize, rotation: rotation)
-                {
-                    imageInfos.append(thumbnailData)
-                    logger.debug(
-                        "Added thumbnail from \(boxType): \(thumbnailData.width ?? 0)x\(thumbnailData.height ?? 0)"
-                    )
-                }
-            }
-
-            if boxSize <= 8 {
-                offset += 8
-            } else {
-                offset += UInt64(boxSize)
-            }
-
-            if offset >= udtaEndOffset {
-                break
-            }
-        }
-
-        return imageInfos
-    }
-
-    private func extractThumbnailFromBox(boxOffset: UInt64, boxSize: UInt32, rotation: Double?)
-        async throws -> Mp4ImageInfo?
-    {
-        logger.debug("Extracting thumbnail from box, size: \(boxSize)")
-
-        // Read initial portion to find JPEG markers
-        let chunkSize: UInt32 = min(1024, boxSize)
-        let headerData = try await reader.read(at: boxOffset, length: chunkSize)
-
-        // 查找JPEG开始标记
-        for i in 0..<headerData.count - 1 {
-            if headerData[i] == 0xFF && headerData[i + 1] == 0xD8 {
-                logger.debug("Found JPEG start marker at offset \(i)")
-                let jpegStartOffset = boxOffset + UInt64(i)
-                let maxJpegSize = boxSize - UInt32(i)
-
-                // Try to find JPEG end marker by reading in chunks
-                var jpegSize = maxJpegSize
-                if maxJpegSize > 1024 {
-                    // Read last chunk to look for end marker
-                    let endChunkSize = min(1024, maxJpegSize)
-                    let endOffset = jpegStartOffset + UInt64(maxJpegSize) - UInt64(endChunkSize)
-                    let endData = try await reader.read(at: endOffset, length: endChunkSize)
-
-                    for j in stride(from: endData.count - 1, to: 0, by: -1) {
-                        if endData[j - 1] == 0xFF && endData[j] == 0xD9 {
-                            jpegSize = UInt32(endOffset - jpegStartOffset) + UInt32(j) + 1
-                            logger.debug("Found JPEG end marker, final size: \(jpegSize)")
-                            break
-                        }
-                    }
-                }
-
-                // Read a small portion to get dimensions
-                let dimensionData = try await reader.read(
-                    at: jpegStartOffset, length: min(256, jpegSize))
-                let (width, height) = extractJpegDimensions(data: dimensionData)
-
-                return Mp4ImageInfo(
-                    width: width,
-                    height: height,
-                    rotation: rotation,
-                    embeddedData: nil,
-                    thumbnailOffset: jpegStartOffset,
-                    thumbnailSize: jpegSize,
-                    frameOffset: nil,
-                    frameSize: nil,
-                    videoTrackInfo: nil
-                )
-            }
-        }
-
-        return nil
-    }
 }
 
 // MARK: - MP4 Data Structures
@@ -999,12 +728,7 @@ private struct Mp4ImageInfo {
     let width: UInt32?
     let height: UInt32?
     let rotation: Double?
-    // For embedded thumbnails
-    let embeddedData: Data?
-    // For lazy-loaded thumbnails
-    let thumbnailOffset: UInt64?
-    let thumbnailSize: UInt32?
-    // For first frame extraction
+    // For first frame extraction only
     let frameOffset: UInt64?
     let frameSize: UInt32?
     let videoTrackInfo: VideoTrackInfo?
@@ -1054,70 +778,4 @@ private func findMoovBox(reader: Reader) async throws -> (UInt64, UInt32)? {
 private struct BoxInfo {
     let offset: UInt64
     let size: UInt32
-}
-
-// MARK: - Utility Functions
-
-private func isJpegData(_ data: Data) -> Bool {
-    return data.count >= 2 && data[0] == 0xFF && data[1] == 0xD8
-}
-
-private func extractJpegDimensions(data: Data) -> (width: UInt32?, height: UInt32?) {
-    guard data.count >= 10 else { return (nil, nil) }
-
-    var offset = 2  // Skip JPEG SOI marker (FF D8)
-
-    while offset + 4 < data.count {
-        guard data[offset] == 0xFF else { break }
-
-        let marker = data[offset + 1]
-        offset += 2
-
-        // Skip padding
-        while offset < data.count && data[offset] == 0xFF {
-            offset += 1
-        }
-
-        if marker == 0xC0 || marker == 0xC2 {  // SOF0 or SOF2
-            guard offset + 6 < data.count else { break }
-
-            let length = UInt16(data[offset]) << 8 | UInt16(data[offset + 1])
-            guard length >= 8, offset + Int(length) <= data.count else { break }
-
-            let height = UInt32(data[offset + 3]) << 8 | UInt32(data[offset + 4])
-            let width = UInt32(data[offset + 5]) << 8 | UInt32(data[offset + 6])
-
-            return (width, height)
-        } else {
-            // Skip this segment
-            guard offset + 2 <= data.count else { break }
-            let length = UInt16(data[offset]) << 8 | UInt16(data[offset + 1])
-            offset += Int(length)
-        }
-    }
-
-    return (nil, nil)
-}
-
-/// Detect image format based on data header
-private func detectImageFormat(data: Data) -> String {
-    guard data.count >= 8 else { return "unknown" }
-
-    // Check for JPEG
-    if data[0] == 0xFF && data[1] == 0xD8 {
-        return "jpeg"
-    }
-
-    // Check for HEIC/HEIF
-    if data.count >= 12 {
-        let ftyp = String(data: data.subdata(in: 4..<8), encoding: .ascii) ?? ""
-        if ftyp == "ftyp" {
-            let brand = String(data: data.subdata(in: 8..<12), encoding: .ascii) ?? ""
-            if brand == "heic" || brand == "heix" || brand == "heif" {
-                return "heic"
-            }
-        }
-    }
-
-    return "unknown"
 }
