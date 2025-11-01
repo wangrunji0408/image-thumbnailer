@@ -6,8 +6,9 @@
             "args": [],
             "cwd": "${workspaceFolder:image-thumbnailer}",
             "name": "Debug ImageThumbnailerCLI",
-            "program": "${workspaceFolder:image-thumbnailer}/.build/debug/ImageThumbnailerCLI",
-            "preLaunchTask": "swift: Build Debug ImageThumbnailerCLI"
+            "preLaunchTask": "swift: Build Debug ImageThumbnailerCLI",
+            "target": "ImageThumbnailerCLI",
+            "configuration": "debug"
         },
         {
             "type": "swift",
@@ -15,8 +16,9 @@
             "args": [],
             "cwd": "${workspaceFolder:image-thumbnailer}",
             "name": "Release ImageThumbnailerCLI",
-            "program": "${workspaceFolder:image-thumbnailer}/.build/release/ImageThumbnailerCLI",
-            "preLaunchTask": "swift: Build Release ImageThumbnailerCLI"
+            "preLaunchTask": "swift: Build Release ImageThumbnailerCLI",
+            "target": "ImageThumbnailerCLI",
+            "configuration": "release"
         }
     ]
 }
