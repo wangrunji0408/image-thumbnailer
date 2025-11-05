@@ -547,12 +547,13 @@ public class Mp4Reader: ImageReader {
 
         // For video sample entry, the structure is:
         // size(4) + type(4) + reserved(6) + data_reference_index(2) + pre_defined(2) + reserved(2) +
-        // pre_defined(12) + width(2) + height(2) + ... + compressorname(32) + depth(2) + pre_defined(2) +
+        // pre_defined(12) + width(2) + height(2) + horizresolution(4) + vertresolution(4) +
+        // reserved(4) + frame_count(2) + compressorname(32) + depth(2) + pre_defined(2) +
         // then extension boxes including hvcC/avcC
 
         // The config box should be after the standard video sample entry fields
-        // Standard video sample entry is 78 bytes, then comes extension boxes
-        let videoSampleEntrySize: UInt64 = 78
+        // Standard video sample entry is 86 bytes (not 78!), then comes extension boxes
+        let videoSampleEntrySize: UInt64 = 86
         let extensionOffset = entryOffset + videoSampleEntrySize
         let sampleEntryEndOffset = entryOffset + UInt64(entrySize)
 
