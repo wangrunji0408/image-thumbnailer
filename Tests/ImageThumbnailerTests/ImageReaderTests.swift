@@ -197,4 +197,66 @@ final class ImageReaderTests: XCTestCase {
 
         print("MP4 Reader - Read count: \(readCount), Total bytes: \(totalBytes)")
     }
+
+    func testMp4ReaderH264() async throws {
+        let bundle = Bundle.module
+        guard let url = bundle.url(forResource: "IMG_0772", withExtension: "MOV") else {
+            XCTFail("Test file not found")
+            return
+        }
+
+        var readCount = 0
+        var totalBytes: UInt64 = 0
+
+        let readAt: (UInt64, UInt32) async throws -> Data = { offset, length in
+            readCount += 1
+            totalBytes += UInt64(length)
+
+            let fileHandle = try FileHandle(forReadingFrom: url)
+            defer { fileHandle.closeFile() }
+
+            try fileHandle.seek(toOffset: offset)
+            return fileHandle.readData(ofLength: Int(length))
+        }
+
+        let reader = Mp4Reader(readAt: readAt)
+
+        // Test getMetadata
+        let metadata = try await reader.getMetadata()
+        XCTAssertGreaterThan(metadata.width, 0, "Width should be greater than 0")
+        XCTAssertGreaterThan(metadata.height, 0, "Height should be greater than 0")
+        XCTAssertNotNil(metadata.duration, "Duration should be parsed")
+
+        // Additional assertions based on exiftool output for IMG_0772.MOV
+        // Image dimensions: 1920x1080
+        XCTAssertEqual(metadata.width, 1920, "Width should be 1920")
+        XCTAssertEqual(metadata.height, 1080, "Height should be 1080")
+
+        // Duration should be around 3.25 seconds
+        if let duration = metadata.duration {
+            XCTAssertTrue(
+                duration > 3.2 && duration < 3.3, "Duration should be around 3.25 seconds")
+        }
+
+        // Test getThumbnailList
+        let thumbnailList = try await reader.getThumbnailList()
+        XCTAssertFalse(thumbnailList.isEmpty, "Should find at least one thumbnail")
+        XCTAssertEqual(thumbnailList[0].format, "heic", "Thumbnail format should be heic")
+        XCTAssertEqual(thumbnailList[0].width, 1920, "Thumbnail width should be 1920")
+        XCTAssertEqual(thumbnailList[0].height, 1080, "Thumbnail height should be 1080")
+
+        // Test getThumbnail (extract first frame)
+        let thumbnailData = try await reader.getThumbnail(at: 0)
+        XCTAssertFalse(thumbnailData.isEmpty, "Thumbnail data should not be empty")
+        XCTAssertGreaterThan(
+            thumbnailData.count, 100 * 1024, "Thumbnail should be larger than 100KB")
+
+        // Assert reasonable limits for H.264 MP4 files
+        XCTAssertLessThanOrEqual(
+            readCount, 5, "MP4 H.264 reader should not make more than 5 read calls")
+        XCTAssertLessThanOrEqual(
+            totalBytes, 1024 * 1024, "MP4 H.264 reader should not read more than 1MB total")
+
+        print("MP4 H.264 Reader - Read count: \(readCount), Total bytes: \(totalBytes)")
+    }
 }

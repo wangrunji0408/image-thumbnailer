@@ -160,14 +160,17 @@ public class Mp4Reader: ImageReader {
                         trackDimensions = (trackInfo.width, trackInfo.height)
 
                         // Create video track info for first frame extraction
-                        if trackInfo.stblOffset != 0, let hevcConfig = trackInfo.hevcConfig {
+                        if trackInfo.stblOffset != 0, let hevcConfig = trackInfo.hevcConfig,
+                            let codecType = trackInfo.codecType
+                        {
                             videoTrackInfo = VideoTrackInfo(
                                 width: trackInfo.width,
                                 height: trackInfo.height,
                                 stblOffset: trackInfo.stblOffset,
                                 stblSize: trackInfo.stblSize,
                                 hevcConfig: hevcConfig,
-                                rotation: trackInfo.rotation
+                                rotation: trackInfo.rotation,
+                                codecType: codecType
                             )
                             break
                         }
@@ -194,6 +197,7 @@ public class Mp4Reader: ImageReader {
         let stblOffset: UInt64
         let stblSize: UInt32
         let hevcConfig: Data?
+        let codecType: String?
     }
 
     // Parse all track information in a single pass
@@ -245,6 +249,7 @@ public class Mp4Reader: ImageReader {
         var stblOffset: UInt64 = 0
         var stblSize: UInt32 = 0
         var hevcConfig: Data?
+        var codecType: String?
 
         if isVideo {
             if let minfBox = try await findBox(
@@ -255,10 +260,14 @@ public class Mp4Reader: ImageReader {
                 {
                     stblOffset = stblBox.offset
                     stblSize = stblBox.size
-                    hevcConfig = try await extractHevcConfig(
+                    let configResult = try await extractVideoConfig(
                         stblOffset: stblOffset, stblSize: stblSize)
+                    hevcConfig = configResult.config
+                    codecType = configResult.codecType
                     if let config = hevcConfig {
-                        logger.debug("Using extracted HEVC config, size: \(config.count)")
+                        logger.debug(
+                            "Using extracted \(codecType ?? "unknown") config, size: \(config.count)"
+                        )
                     }
                 }
             }
@@ -271,7 +280,8 @@ public class Mp4Reader: ImageReader {
             isVideo: isVideo,
             stblOffset: stblOffset,
             stblSize: stblSize,
-            hevcConfig: hevcConfig
+            hevcConfig: hevcConfig,
+            codecType: codecType
         )
     }
 
@@ -440,34 +450,36 @@ public class Mp4Reader: ImageReader {
         return frameSize
     }
 
-    /// Convert HEVC frame data to HEIC format
+    /// Convert video frame data to HEIC format (supports both HEVC and AVC)
     private func convertHevcFrameToHeic(frameData: Data, trackInfo: VideoTrackInfo) async throws
         -> Data?
     {
-        logger.debug("Converting HEVC frame to HEIC, frame size: \(frameData.count)")
+        logger.debug(
+            "Converting \(trackInfo.codecType) frame to HEIC, frame size: \(frameData.count)")
 
         // For HEIC format, we need to use the original length-prefixed format
-        // but ensure parameter sets are included in the HEVC configuration
-        let hevcData = frameData
+        // but ensure parameter sets are included in the video configuration
+        let videoData = frameData
 
-        logger.debug("Using original HEVC frame data for HEIC, size: \(hevcData.count)")
+        logger.debug(
+            "Using original \(trackInfo.codecType) frame data for HEIC, size: \(videoData.count)")
 
-        // Create a basic HEIC container for the HEVC frame
+        // Create a basic HEIC container for the video frame
         let thumbnail = HeifThumbnailEntry(
             itemId: 1,
             offset: 0,
-            size: UInt32(hevcData.count),
+            size: UInt32(videoData.count),
             rotation: trackInfo.rotation.map { Int($0) },
             width: trackInfo.width,
             height: trackInfo.height,
-            type: "hvc1",
-            properties: createBasicHevcProperties(
-                width: trackInfo.width, height: trackInfo.height, hevcConfig: trackInfo.hevcConfig,
-                rotation: trackInfo.rotation)
+            type: trackInfo.codecType,
+            properties: createBasicVideoProperties(
+                width: trackInfo.width, height: trackInfo.height, videoConfig: trackInfo.hevcConfig,
+                rotation: trackInfo.rotation, codecType: trackInfo.codecType)
         )
 
         logger.debug("Creating HEIC container for \(trackInfo.width)x\(trackInfo.height) image")
-        let heicData = try await createHEICFromHEVC(thumbnail, hevcData: hevcData)
+        let heicData = try await createHEICFromHEVC(thumbnail, hevcData: videoData)
 
         if let heicData = heicData {
             logger.debug("Successfully created HEIC data, size: \(heicData.count)")
@@ -478,15 +490,17 @@ public class Mp4Reader: ImageReader {
         return heicData
     }
 
-    /// Extract HEVC configuration from sample description table
-    private func extractHevcConfig(stblOffset: UInt64, stblSize: UInt32) async throws -> Data? {
+    /// Extract video configuration from sample description table (supports both HEVC and AVC)
+    private func extractVideoConfig(stblOffset: UInt64, stblSize: UInt32) async throws -> (
+        config: Data?, codecType: String?
+    ) {
         // Look for sample description (stsd) box
         guard
             let stsdBox = try await findBox(offset: stblOffset, length: stblSize, boxType: "stsd"),
             stsdBox.size >= 16
         else {
             logger.error("Could not find stsd box or box too small")
-            return nil
+            return (nil, nil)
         }
 
         logger.debug("stsd box data size: \(stsdBox.size)")
@@ -494,7 +508,7 @@ public class Mp4Reader: ImageReader {
         // Parse stsd box: version(1) + flags(3) + entry_count(4) + entries...
         guard stsdBox.size >= 8 else {
             logger.error("stsd box too small for header")
-            return nil
+            return (nil, nil)
         }
 
         let entryCount = try await reader.readUInt32(at: stsdBox.offset + 4)
@@ -502,7 +516,7 @@ public class Mp4Reader: ImageReader {
 
         guard entryCount > 0 else {
             logger.error("No sample entries found")
-            return nil
+            return (nil, nil)
         }
 
         // Start parsing from offset 8 (after stsd header)
@@ -510,7 +524,7 @@ public class Mp4Reader: ImageReader {
         let stsdEndOffset = stsdBox.offset + UInt64(stsdBox.size)
         guard entryOffset + 8 <= stsdEndOffset else {
             logger.error("stsd data too small for sample entry")
-            return nil
+            return (nil, nil)
         }
 
         // Read first sample entry size
@@ -520,17 +534,23 @@ public class Mp4Reader: ImageReader {
         let codecType = try await reader.readString(at: entryOffset + 4, length: 4)
         logger.debug("Found codec type: '\(codecType)', entry size: \(entrySize)")
 
-        guard codecType == "hvc1" || codecType == "hev1" else {
-            logger.error("Not an HEVC codec: '\(codecType)'")
-            return nil
+        // Support both HEVC (hvc1/hev1) and AVC (avc1/avc3)
+        let configBoxType: String
+        if codecType == "hvc1" || codecType == "hev1" {
+            configBoxType = "hvcC"
+        } else if codecType == "avc1" || codecType == "avc3" {
+            configBoxType = "avcC"
+        } else {
+            logger.error("Unsupported codec type: '\(codecType)'")
+            return (nil, nil)
         }
 
-        // For HEVC sample entry, the structure is:
+        // For video sample entry, the structure is:
         // size(4) + type(4) + reserved(6) + data_reference_index(2) + pre_defined(2) + reserved(2) +
         // pre_defined(12) + width(2) + height(2) + ... + compressorname(32) + depth(2) + pre_defined(2) +
-        // then extension boxes including hvcC
+        // then extension boxes including hvcC/avcC
 
-        // The hvcC box should be after the standard video sample entry fields
+        // The config box should be after the standard video sample entry fields
         // Standard video sample entry is 78 bytes, then comes extension boxes
         let videoSampleEntrySize: UInt64 = 78
         let extensionOffset = entryOffset + videoSampleEntrySize
@@ -538,30 +558,30 @@ public class Mp4Reader: ImageReader {
 
         guard extensionOffset < sampleEntryEndOffset else {
             logger.error("Sample entry too small for video sample entry + extensions")
-            return nil
+            return (nil, nil)
         }
 
-        // Look for hvcC in the extension area
+        // Look for config box (hvcC or avcC) in the extension area
         logger.debug(
-            "Searching for hvcC in extension data, range: \(extensionOffset)-\(sampleEntryEndOffset)"
+            "Searching for \(configBoxType) in extension data, range: \(extensionOffset)-\(sampleEntryEndOffset)"
         )
 
-        if let hvcCBox = try await findBox(
+        if let configBox = try await findBox(
             offset: extensionOffset, length: UInt32(sampleEntryEndOffset - extensionOffset),
-            boxType: "hvcC")
+            boxType: configBoxType)
         {
-            logger.debug("Found hvcC configuration, size: \(hvcCBox.size)")
-            let hvcCData = try await reader.read(at: hvcCBox.offset, length: hvcCBox.size)
-            return hvcCData
+            logger.debug("Found \(configBoxType) configuration, size: \(configBox.size)")
+            let configData = try await reader.read(at: configBox.offset, length: configBox.size)
+            return (configData, codecType)
         } else {
-            logger.error("hvcC configuration not found in sample entry")
-            return nil
+            logger.error("\(configBoxType) configuration not found in sample entry")
+            return (nil, nil)
         }
     }
 
-    /// Create HEVC properties for HEIC container
-    private func createBasicHevcProperties(
-        width: UInt32, height: UInt32, hevcConfig: Data?, rotation: Double?
+    /// Create video properties for HEIC container (supports both HEVC and AVC)
+    private func createBasicVideoProperties(
+        width: UInt32, height: UInt32, videoConfig: Data?, rotation: Double?, codecType: String
     )
         -> [ItemProperty]
     {
@@ -587,40 +607,68 @@ public class Mp4Reader: ImageReader {
             ))
         propertyIndex += 1
 
-        // HEVC configuration property (hvcC)
-        let hvcCData: Data
-        if let hevcConfig = hevcConfig, hevcConfig.count > 0 {
-            // Use extracted HEVC configuration
-            logger.debug("Using extracted HEVC config, size: \(hevcConfig.count)")
-            hvcCData = hevcConfig
+        // Video configuration property (hvcC for HEVC or avcC for AVC)
+        let configPropertyType: String
+        let configData: Data
+
+        if codecType == "hvc1" || codecType == "hev1" {
+            configPropertyType = "hvcC"
+            if let videoConfig = videoConfig, videoConfig.count > 0 {
+                // Use extracted HEVC configuration
+                logger.debug("Using extracted HEVC config, size: \(videoConfig.count)")
+                configData = videoConfig
+            } else {
+                // Fallback to minimal HEVC configuration
+                logger.warning("No HEVC config found, using fallback configuration")
+                configData = Data([
+                    0x01,  // configuration version
+                    0x01,  // general_profile_space, general_tier_flag, general_profile_idc
+                    0x40, 0x00, 0x00, 0x00,  // general_profile_compatibility_flags
+                    0x90, 0x00, 0x00, 0x00, 0x00, 0x00,  // general_constraint_indicator_flags
+                    0x5d,  // general_level_idc
+                    0xf0, 0x00,  // min_spatial_segmentation_idc
+                    0xfc,  // parallelismType
+                    0xfd,  // chromaFormat
+                    0xf8,  // bitDepthLumaMinus8
+                    0xf8,  // bitDepthChromaMinus8
+                    0x00, 0x00,  // avgFrameRate
+                    0x0f,  // constantFrameRate, numTemporalLayers, temporalIdNested, lengthSizeMinusOne
+                    0x00,  // numOfArrays (no parameter sets)
+                ])
+            }
+        } else if codecType == "avc1" || codecType == "avc3" {
+            configPropertyType = "avcC"
+            if let videoConfig = videoConfig, videoConfig.count > 0 {
+                // Use extracted AVC configuration
+                logger.debug("Using extracted AVC config, size: \(videoConfig.count)")
+                configData = videoConfig
+            } else {
+                // Fallback to minimal AVC configuration
+                logger.warning("No AVC config found, using fallback configuration")
+                configData = Data([
+                    0x01,  // configuration version
+                    0x42,  // AVCProfileIndication (Baseline)
+                    0x00,  // profile_compatibility
+                    0x1e,  // AVCLevelIndication (level 3.0)
+                    0xff,  // lengthSizeMinusOne (4 bytes)
+                    0xe0,  // numOfSequenceParameterSets (0)
+                    0x00,  // numOfPictureParameterSets (0)
+                ])
+            }
         } else {
-            // Fallback to minimal HEVC configuration
-            logger.warning("No HEVC config found, using fallback configuration")
-            hvcCData = Data([
-                0x01,  // configuration version
-                0x01,  // general_profile_space, general_tier_flag, general_profile_idc
-                0x40, 0x00, 0x00, 0x00,  // general_profile_compatibility_flags
-                0x90, 0x00, 0x00, 0x00, 0x00, 0x00,  // general_constraint_indicator_flags
-                0x5d,  // general_level_idc
-                0xf0, 0x00,  // min_spatial_segmentation_idc
-                0xfc,  // parallelismType
-                0xfd,  // chromaFormat
-                0xf8,  // bitDepthLumaMinus8
-                0xf8,  // bitDepthChromaMinus8
-                0x00, 0x00,  // avgFrameRate
-                0x0f,  // constantFrameRate, numTemporalLayers, temporalIdNested, lengthSizeMinusOne
-                0x00,  // numOfArrays (no parameter sets)
-            ])
+            logger.warning("Unknown codec type: \(codecType), using empty config")
+            configPropertyType = "hvcC"
+            configData = Data()
         }
 
         properties.append(
             ItemProperty(
                 propertyIndex: propertyIndex,
-                propertyType: "hvcC",
+                propertyType: configPropertyType,
                 rotation: nil,
                 width: nil,
                 height: nil,
-                rawData: hvcCData
+                rawData: configData
             ))
         propertyIndex += 1
 
@@ -741,6 +789,7 @@ private struct VideoTrackInfo {
     let stblSize: UInt32
     let hevcConfig: Data?
     let rotation: Double?
+    let codecType: String
 }
 
 // MARK: - Private Implementation
