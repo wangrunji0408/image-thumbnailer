@@ -108,7 +108,8 @@ public class Mp4Reader: ImageReader {
             metadata = Metadata(
                 width: trackDimensions.width,
                 height: trackDimensions.height,
-                duration: parsedInfo.duration
+                duration: parsedInfo.duration,
+                location: parsedInfo.gpsLocation
             )
         } else {
             throw ImageReaderError.invalidData
@@ -120,6 +121,7 @@ public class Mp4Reader: ImageReader {
         let trackDimensions: (width: UInt32, height: UInt32)?
         let duration: Double?
         let videoTrackInfo: VideoTrackInfo?
+        let gpsLocation: GPSLocation?
     }
 
     private func parseAllMoovInfo(moovOffset: UInt64, moovSize: UInt32) async throws
@@ -128,6 +130,7 @@ public class Mp4Reader: ImageReader {
         logger.debug("Parsing moov box, size: \(moovSize)")
         var trackDimensions: (width: UInt32, height: UInt32)?
         var videoTrackInfo: VideoTrackInfo?
+        var gpsLocation: GPSLocation?
         let moovEndOffset = moovOffset + UInt64(moovSize)
 
         // Parse duration from mvhd box
@@ -172,10 +175,21 @@ public class Mp4Reader: ImageReader {
                                 rotation: trackInfo.rotation,
                                 codecType: codecType
                             )
-                            break
                         }
                     }
                 }
+            } else if boxType == "udta" {
+                // Parse user data for GPS location (legacy format)
+                let udtaOffset = offset + 8
+                let udtaEndOffset = offset + UInt64(boxSize)
+                gpsLocation = try await parseUdtaBox(
+                    offset: udtaOffset, endOffset: udtaEndOffset)
+            } else if boxType == "meta" {
+                // Parse metadata for GPS location (modern QuickTime format)
+                let metaOffset = offset + 8
+                let metaEndOffset = offset + UInt64(boxSize)
+                gpsLocation = try await parseMetaBox(
+                    metaOffset: metaOffset, metaEndOffset: metaEndOffset)
             }
 
             offset += UInt64(boxSize)
@@ -184,7 +198,8 @@ public class Mp4Reader: ImageReader {
         return ParsedMoovInfo(
             trackDimensions: trackDimensions,
             duration: duration,
-            videoTrackInfo: videoTrackInfo
+            videoTrackInfo: videoTrackInfo,
+            gpsLocation: gpsLocation
         )
     }
 
@@ -828,4 +843,256 @@ private func findMoovBox(reader: Reader) async throws -> (UInt64, UInt32)? {
 private struct BoxInfo {
     let offset: UInt64
     let size: UInt32
+}
+
+// MARK: - GPS Parsing from UDTA
+
+extension Mp4Reader {
+    private func parseUdtaBox(offset: UInt64, endOffset: UInt64) async throws
+        -> GPSLocation?
+    {
+        var offset = offset
+
+        while offset + 8 <= endOffset {
+            let boxSize = try await reader.readUInt32(at: offset)
+            let boxType = try await reader.readString(at: offset + 4, length: 4)
+
+            guard boxSize > 8 && offset + UInt64(boxSize) <= endOffset else {
+                offset += 8
+                continue
+            }
+
+            // Look for ©xyz box which contains GPS coordinates in ISO 6709 format
+            if boxType == "©xyz" || boxType == "\u{00A9}xyz" {
+                logger.debug("Found ©xyz box at offset \(offset), size: \(boxSize)")
+
+                // The ©xyz box contains: 4 bytes size + 4 bytes type + version/flags + ISO 6709 string
+                let dataOffset = offset + 8
+                let dataSize = boxSize - 8
+
+                guard dataSize > 4 else {
+                    offset += UInt64(boxSize)
+                    continue
+                }
+
+                // Read the GPS data (skip first 4 bytes for version/flags)
+                let gpsData = try await reader.read(at: dataOffset + 4, length: dataSize - 4)
+
+                if let gpsString = String(data: gpsData, encoding: .utf8)?.trimmingCharacters(
+                    in: .whitespaces.union(.controlCharacters))
+                {
+                    logger.debug("GPS string: \(gpsString)")
+                    if let location = parseISO6709(gpsString) {
+                        return location
+                    }
+                }
+            }
+
+            offset += UInt64(boxSize)
+        }
+
+        return nil
+    }
+
+    // Parse ISO 6709 format GPS string
+    // Format: "+39.9595+116.2737+087.760/" or similar
+    private func parseISO6709(_ string: String) -> GPSLocation? {
+        // Remove trailing slash if present
+        let cleanString = string.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+
+        // Try to parse the string
+        // Format can be: +DD.DDDD+DDD.DDDD+AAA.AAA/
+        // Where first is latitude, second is longitude, third is altitude
+
+        var components: [Double] = []
+        var currentNumber = ""
+
+        for char in cleanString {
+            if char == "+" || char == "-" {
+                if !currentNumber.isEmpty {
+                    if let value = Double(currentNumber) {
+                        components.append(value)
+                    }
+                    currentNumber = ""
+                }
+                currentNumber.append(char)
+            } else {
+                currentNumber.append(char)
+            }
+        }
+
+        // Add last component
+        if !currentNumber.isEmpty {
+            if let value = Double(currentNumber) {
+                components.append(value)
+            }
+        }
+
+        guard components.count >= 2 else {
+            logger.debug("Failed to parse GPS components from: \(string)")
+            return nil
+        }
+
+        let latitude = components[0]
+        let longitude = components[1]
+        let altitude = components.count >= 3 ? components[2] : nil
+
+        logger.debug("Parsed GPS: lat=\(latitude), lon=\(longitude), alt=\(altitude ?? 0)")
+
+        return GPSLocation(latitude: latitude, longitude: longitude, altitude: altitude)
+    }
+
+    // Parse QuickTime metadata box for GPS coordinates
+    private func parseMetaBox(metaOffset: UInt64, metaEndOffset: UInt64) async throws
+        -> GPSLocation?
+    {
+        logger.info("Parsing meta box for GPS data")
+
+        // QuickTime meta box has 4 bytes version/flags, but some variations don't
+        // Try to detect by reading the possible box type at offset 4
+        let maybeBoxType = try await reader.readString(at: metaOffset + 4, length: 4)
+
+        var offset: UInt64
+        if maybeBoxType == "hdlr" || maybeBoxType == "keys" {
+            // No version/flags, directly sub-boxes
+            offset = metaOffset
+        } else {
+            // Has version/flags
+            offset = metaOffset + 4
+        }
+
+        var keysData: [(index: UInt32, namespace: String, key: String)] = []
+        var ilstData: [(index: UInt32, value: Data)] = []
+
+        // First pass: find keys and ilst boxes
+        while offset + 8 <= metaEndOffset {
+            let boxSize = try await reader.readUInt32(at: offset)
+            let boxType = try await reader.readString(at: offset + 4, length: 4)
+
+            guard boxSize > 8 && offset + UInt64(boxSize) <= metaEndOffset else {
+                offset += 8
+                continue
+            }
+
+            if boxType == "keys" {
+                logger.info("Found keys box")
+                // Parse keys box
+                keysData = try await parseKeysBox(keysOffset: offset + 8, keysSize: boxSize - 8)
+                logger.info("Found \(keysData.count) metadata keys")
+            } else if boxType == "ilst" {
+                logger.info("Found ilst box")
+                // Parse ilst box
+                ilstData = try await parseIlstBox(
+                    ilstOffset: offset + 8, ilstEndOffset: offset + UInt64(boxSize))
+                logger.info("Found \(ilstData.count) metadata items")
+            }
+
+            offset += UInt64(boxSize)
+        }
+
+        // Match keys with values to find GPS coordinates
+        for key in keysData {
+            if key.key == "com.apple.quicktime.location.ISO6709" {
+                // Find corresponding value in ilst
+                if let item = ilstData.first(where: { $0.index == key.index }) {
+                    if let gpsString = String(data: item.value, encoding: .utf8)?
+                        .trimmingCharacters(in: .whitespaces.union(.controlCharacters))
+                    {
+                        logger.debug("Found GPS string from keys: \(gpsString)")
+                        return parseISO6709(gpsString)
+                    }
+                }
+            }
+        }
+
+        return nil
+    }
+
+    private func parseKeysBox(keysOffset: UInt64, keysSize: UInt32) async throws -> [(
+        index: UInt32, namespace: String, key: String
+    )] {
+        var keys: [(UInt32, String, String)] = []
+
+        // Keys box format: version/flags (4) + entry_count (4) + entries
+        guard keysSize >= 8 else { return keys }
+
+        let entryCount = try await reader.readUInt32(at: keysOffset + 4)
+        var offset = keysOffset + 8
+
+        for i in 0..<entryCount {
+            guard offset + 8 <= keysOffset + UInt64(keysSize) else { break }
+
+            let keySize = try await reader.readUInt32(at: offset)
+            guard keySize >= 8 else {
+                offset += 4
+                continue
+            }
+
+            let namespace = try await reader.readString(at: offset + 4, length: 4)
+            let keyLength = keySize - 8
+
+            guard keyLength > 0 && offset + UInt64(keySize) <= keysOffset + UInt64(keysSize) else {
+                offset += UInt64(keySize)
+                continue
+            }
+
+            let keyData = try await reader.read(at: offset + 8, length: keyLength)
+            if let keyString = String(data: keyData, encoding: .utf8) {
+                keys.append((i + 1, namespace, keyString))
+            }
+
+            offset += UInt64(keySize)
+        }
+
+        return keys
+    }
+
+    private func parseIlstBox(ilstOffset: UInt64, ilstEndOffset: UInt64) async throws -> [(
+        index: UInt32, value: Data
+    )] {
+        var items: [(UInt32, Data)] = []
+        var offset = ilstOffset
+
+        while offset + 8 <= ilstEndOffset {
+            let boxSize = try await reader.readUInt32(at: offset)
+
+            guard boxSize > 8 && offset + UInt64(boxSize) <= ilstEndOffset else {
+                offset += 8
+                continue
+            }
+
+            // The box type is actually the index number
+            let index = try await reader.readUInt32(at: offset + 4)
+
+            // Inside each item is a 'data' box
+            var itemOffset = offset + 8
+            let itemEnd = offset + UInt64(boxSize)
+
+            while itemOffset + 8 <= itemEnd {
+                let dataBoxSize = try await reader.readUInt32(at: itemOffset)
+                let dataBoxType = try await reader.readString(at: itemOffset + 4, length: 4)
+
+                guard dataBoxSize > 16 && itemOffset + UInt64(dataBoxSize) <= itemEnd else {
+                    itemOffset += 8
+                    continue
+                }
+
+                if dataBoxType == "data" {
+                    // data box: size (4) + type (4) + type_indicator (4) + locale (4) + value
+                    let valueSize = dataBoxSize - 16
+                    if valueSize > 0 {
+                        let value = try await reader.read(at: itemOffset + 16, length: valueSize)
+                        items.append((index, value))
+                    }
+                    break
+                }
+
+                itemOffset += UInt64(dataBoxSize)
+            }
+
+            offset += UInt64(boxSize)
+        }
+
+        return items
+    }
 }

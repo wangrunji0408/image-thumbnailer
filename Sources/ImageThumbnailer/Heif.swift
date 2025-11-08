@@ -8,12 +8,12 @@ private let logger = Logger(subsystem: "com.wangrunji.ImageThumbnailer", categor
 // MARK: - HeifReader Implementation
 
 public class HeifReader: ImageReader {
-    private let readAt: (UInt64, UInt32) async throws -> Data
+    private let reader: Reader
     private var thumbnailInfos: [HeifThumbnailEntry]?
     private var metadata: Metadata?
 
     public required init(readAt: @escaping (UInt64, UInt32) async throws -> Data) {
-        self.readAt = readAt
+        self.reader = Reader(readAt: readAt)
     }
 
     public func getThumbnailList() async throws -> [ThumbnailInfo] {
@@ -42,7 +42,7 @@ public class HeifReader: ImageReader {
         }
 
         let info = infos[index]
-        let data = try await readAt(UInt64(info.offset), info.size)
+        let data = try await reader.read(at: UInt64(info.offset), length: info.size)
         return try await createThumbnail(from: info, data: data)
     }
 
@@ -57,15 +57,13 @@ public class HeifReader: ImageReader {
     }
 
     private func loadMetadata() async throws {
-        let reader = Reader(readAt: readAt)
-
         guard let metaData = try await readMetaBox(reader: reader) else {
             logger.error("Meta box not found")
             throw ImageReaderError.invalidData
         }
 
         // Parse the meta box once to get both thumbnails and primary image metadata
-        let (thumbnails, primaryMetadata, exifLocationInfo) = parseMetaBoxForBoth(data: metaData)
+        let (thumbnails, primaryMetadata, exifLocationInfo) = try await parseMetaBoxForBoth(data: metaData)
 
         thumbnailInfos = thumbnails
 
@@ -73,8 +71,7 @@ public class HeifReader: ImageReader {
         var gpsLocation: GPSLocation? = nil
         if let exifInfo = exifLocationInfo {
             do {
-                let exifData = try await reader.read(at: UInt64(exifInfo.offset), length: exifInfo.length)
-                gpsLocation = try await parseExifDataForGPS(data: exifData, reader: reader, baseOffset: UInt64(exifInfo.offset))
+                gpsLocation = try await parseExifForGPS(exifOffset: UInt64(exifInfo.offset))
             } catch {
                 logger.error("Failed to parse EXIF GPS data: \(error)")
             }
@@ -87,7 +84,7 @@ public class HeifReader: ImageReader {
         }
     }
 
-    private func parseMetaBoxForBoth(data: Data) -> (
+    private func parseMetaBoxForBoth(data: Data) async throws -> (
         [HeifThumbnailEntry], (width: UInt32?, height: UInt32?), ItemLocation?
     ) {
         var offset: UInt64 = 12  // Skip meta box header + version/flags
@@ -161,12 +158,67 @@ public class HeifReader: ImageReader {
         // Find EXIF metadata item location
         var exifLocationInfo: ItemLocation? = nil
         if let exifItem = items.first(where: { $0.itemType == "Exif" }),
-           let exifLocation = locations.first(where: { $0.itemId == exifItem.itemId }) {
-            logger.debug("Found EXIF item at offset \(exifLocation.offset), size \(exifLocation.length)")
+            let exifLocation = locations.first(where: { $0.itemId == exifItem.itemId })
+        {
+            logger.debug(
+                "Found EXIF item at offset \(exifLocation.offset), size \(exifLocation.length)")
             exifLocationInfo = exifLocation
         }
 
         return (thumbnails, (width, height), exifLocationInfo)
+    }
+
+    // Parse EXIF data for GPS using Reader
+    private func parseExifForGPS(exifOffset: UInt64) async throws -> GPSLocation? {
+        // HEIF EXIF data starts with a 4-byte offset header
+        let offsetHeader = try await reader.readUInt32(at: exifOffset)
+        let tiffOffset = exifOffset + 4 + UInt64(offsetHeader)
+
+        // Parse TIFF header to determine byte order
+        let byteOrderMark = try await reader.read(at: tiffOffset, length: 2)
+        guard byteOrderMark.count == 2 else { return nil }
+
+        if byteOrderMark[0] == 0x49 && byteOrderMark[1] == 0x49 {  // "II" - little endian
+            reader.setByteOrder(.littleEndian)
+        } else if byteOrderMark[0] == 0x4D && byteOrderMark[1] == 0x4D {  // "MM" - big endian
+            reader.setByteOrder(.bigEndian)
+        } else {
+            return nil
+        }
+
+        // Read IFD offset
+        let ifd0Offset = try await reader.readUInt32(at: tiffOffset + 4)
+
+        // Find GPS IFD in IFD0
+        if let gpsIFDOffset = try await findGPSIFDInIFD(
+            ifdOffset: tiffOffset + UInt64(ifd0Offset))
+        {
+            // Parse GPS IFD
+            return try await parseGPSIFD(
+                reader: reader,
+                exifOffset: tiffOffset,
+                gpsIFDOffset: UInt64(gpsIFDOffset)
+            )
+        }
+
+        return nil
+    }
+
+    // Find GPS IFD offset in an IFD
+    private func findGPSIFDInIFD(ifdOffset: UInt64) async throws -> UInt32? {
+        let entryCount = try await reader.readUInt16(at: ifdOffset)
+
+        for i in 0..<Int(entryCount) {
+            let entryOffset = ifdOffset + 2 + UInt64(i) * 12
+            let tag = try await reader.readUInt16(at: entryOffset)
+
+            if tag == 0x8825 {  // GPS IFD tag
+                let gpsIFDOffset = try await reader.readUInt32(at: entryOffset + 8)
+                return gpsIFDOffset
+            }
+        }
+
+        return nil
     }
 }
 
@@ -821,204 +873,3 @@ private func createThumbnail(from info: HeifThumbnailEntry, data: Data) async th
     }
 }
 
-// MARK: - EXIF GPS Parsing
-
-private func parseExifDataForGPS(data: Data, reader: Reader, baseOffset: UInt64) async throws -> GPSLocation? {
-    // HEIF EXIF data starts with a 4-byte offset header, skip it
-    guard data.count > 4 else { return nil }
-
-    let exifDataOffset: Int = data.withUnsafeBytes { bytes in
-        let offset = bytes.load(fromByteOffset: 0, as: UInt32.self).bigEndian
-        return Int(offset) + 4
-    }
-
-    guard exifDataOffset < data.count else { return nil }
-    let tiffData = data.subdata(in: exifDataOffset..<data.count)
-
-    // Parse TIFF header to determine byte order
-    guard tiffData.count >= 8 else { return nil }
-
-    let byteOrder: ByteOrder
-    if tiffData[0] == 0x49 && tiffData[1] == 0x49 {  // "II" - Intel (little endian)
-        byteOrder = .littleEndian
-    } else if tiffData[0] == 0x4D && tiffData[1] == 0x4D {  // "MM" - Motorola (big endian)
-        byteOrder = .bigEndian
-    } else {
-        return nil
-    }
-
-    reader.setByteOrder(byteOrder)
-
-    // Read IFD offset (at offset 4 in TIFF header)
-    let ifdOffset: UInt32 = tiffData.subdata(in: 4..<8).withUnsafeBytes { bytes in
-        let value = bytes.load(as: UInt32.self)
-        return byteOrder == .littleEndian ? value.littleEndian : value.bigEndian
-    }
-
-    // Parse IFD to find GPS IFD offset
-    return try await parseIFDForGPS(tiffData: tiffData, ifdOffset: ifdOffset, byteOrder: byteOrder)
-}
-
-private func parseIFDForGPS(tiffData: Data, ifdOffset: UInt32, byteOrder: ByteOrder) async throws -> GPSLocation? {
-    guard Int(ifdOffset) + 2 <= tiffData.count else { return nil }
-
-    let entryCount: UInt16 = tiffData.subdata(in: Int(ifdOffset)..<Int(ifdOffset) + 2).withUnsafeBytes { bytes in
-        let value = bytes.load(as: UInt16.self)
-        return byteOrder == .littleEndian ? value.littleEndian : value.bigEndian
-    }
-
-    var currentOffset = Int(ifdOffset) + 2
-    var gpsIFDOffset: UInt32? = nil
-
-    // Search for GPS IFD tag (0x8825)
-    for _ in 0..<entryCount {
-        guard currentOffset + 12 <= tiffData.count else { break }
-
-        let tag: UInt16 = tiffData.subdata(in: currentOffset..<currentOffset + 2).withUnsafeBytes { bytes in
-            let value = bytes.load(as: UInt16.self)
-            return byteOrder == .littleEndian ? value.littleEndian : value.bigEndian
-        }
-
-        if tag == 0x8825 {  // GPS IFD
-            gpsIFDOffset = tiffData.subdata(in: currentOffset + 8..<currentOffset + 12).withUnsafeBytes { bytes in
-                let value = bytes.load(as: UInt32.self)
-                return byteOrder == .littleEndian ? value.littleEndian : value.bigEndian
-            }
-            break
-        }
-
-        currentOffset += 12
-    }
-
-    guard let gpsOffset = gpsIFDOffset else { return nil }
-
-    return try await parseGPSIFD(tiffData: tiffData, gpsOffset: gpsOffset, byteOrder: byteOrder)
-}
-
-private func parseGPSIFD(tiffData: Data, gpsOffset: UInt32, byteOrder: ByteOrder) async throws -> GPSLocation? {
-    guard Int(gpsOffset) + 2 <= tiffData.count else { return nil }
-
-    let entryCount: UInt16 = tiffData.subdata(in: Int(gpsOffset)..<Int(gpsOffset) + 2).withUnsafeBytes { bytes in
-        let value = bytes.load(as: UInt16.self)
-        return byteOrder == .littleEndian ? value.littleEndian : value.bigEndian
-    }
-
-    var currentOffset = Int(gpsOffset) + 2
-
-    var latitudeRef: String?
-    var latitudeData: [Double]?
-    var longitudeRef: String?
-    var longitudeData: [Double]?
-    var altitudeRef: UInt8?
-    var altitude: Double?
-
-    for _ in 0..<entryCount {
-        guard currentOffset + 12 <= tiffData.count else { break }
-
-        let tag: UInt16 = tiffData.subdata(in: currentOffset..<currentOffset + 2).withUnsafeBytes { bytes in
-            let value = bytes.load(as: UInt16.self)
-            return byteOrder == .littleEndian ? value.littleEndian : value.bigEndian
-        }
-
-        let type: UInt16 = tiffData.subdata(in: currentOffset + 2..<currentOffset + 4).withUnsafeBytes { bytes in
-            let value = bytes.load(as: UInt16.self)
-            return byteOrder == .littleEndian ? value.littleEndian : value.bigEndian
-        }
-
-        let count: UInt32 = tiffData.subdata(in: currentOffset + 4..<currentOffset + 8).withUnsafeBytes { bytes in
-            let value = bytes.load(as: UInt32.self)
-            return byteOrder == .littleEndian ? value.littleEndian : value.bigEndian
-        }
-
-        let valueOffset: UInt32 = tiffData.subdata(in: currentOffset + 8..<currentOffset + 12).withUnsafeBytes { bytes in
-            let value = bytes.load(as: UInt32.self)
-            return byteOrder == .littleEndian ? value.littleEndian : value.bigEndian
-        }
-
-        switch tag {
-        case 0x0001:  // GPSLatitudeRef
-            if type == 2, count == 2 {
-                latitudeRef = String(data: tiffData.subdata(in: currentOffset + 8..<currentOffset + 9), encoding: .ascii)
-            }
-        case 0x0002:  // GPSLatitude
-            if type == 5, count == 3 {
-                latitudeData = parseRationalArray(tiffData: tiffData, offset: Int(valueOffset), count: 3, byteOrder: byteOrder)
-            }
-        case 0x0003:  // GPSLongitudeRef
-            if type == 2, count == 2 {
-                longitudeRef = String(data: tiffData.subdata(in: currentOffset + 8..<currentOffset + 9), encoding: .ascii)
-            }
-        case 0x0004:  // GPSLongitude
-            if type == 5, count == 3 {
-                longitudeData = parseRationalArray(tiffData: tiffData, offset: Int(valueOffset), count: 3, byteOrder: byteOrder)
-            }
-        case 0x0005:  // GPSAltitudeRef
-            if type == 1 {
-                altitudeRef = UInt8(valueOffset & 0xFF)
-            }
-        case 0x0006:  // GPSAltitude
-            if type == 5 {
-                if let rational = parseRational(tiffData: tiffData, offset: Int(valueOffset), byteOrder: byteOrder) {
-                    altitude = rational
-                    if altitudeRef == 1 {
-                        altitude = -rational
-                    }
-                }
-            }
-        default:
-            break
-        }
-
-        currentOffset += 12
-    }
-
-    // Convert GPS coordinates to decimal degrees
-    guard let latRef = latitudeRef, let latData = latitudeData, latData.count == 3,
-          let lonRef = longitudeRef, let lonData = longitudeData, lonData.count == 3
-    else {
-        logger.debug("GPS data incomplete in HEIF")
-        return nil
-    }
-
-    let latitude = convertToDecimalDegrees(degrees: latData[0], minutes: latData[1], seconds: latData[2], ref: latRef)
-    let longitude = convertToDecimalDegrees(degrees: lonData[0], minutes: lonData[1], seconds: lonData[2], ref: lonRef)
-
-    logger.debug("Parsed GPS location from HEIF: lat=\(latitude), lon=\(longitude), alt=\(altitude ?? 0)")
-
-    return GPSLocation(latitude: latitude, longitude: longitude, altitude: altitude)
-}
-
-private func parseRational(tiffData: Data, offset: Int, byteOrder: ByteOrder) -> Double? {
-    guard offset + 8 <= tiffData.count else { return nil }
-
-    let numerator: UInt32 = tiffData.subdata(in: offset..<offset + 4).withUnsafeBytes { bytes in
-        let value = bytes.load(as: UInt32.self)
-        return byteOrder == .littleEndian ? value.littleEndian : value.bigEndian
-    }
-
-    let denominator: UInt32 = tiffData.subdata(in: offset + 4..<offset + 8).withUnsafeBytes { bytes in
-        let value = bytes.load(as: UInt32.self)
-        return byteOrder == .littleEndian ? value.littleEndian : value.bigEndian
-    }
-
-    guard denominator != 0 else { return 0 }
-    return Double(numerator) / Double(denominator)
-}
-
-private func parseRationalArray(tiffData: Data, offset: Int, count: Int, byteOrder: ByteOrder) -> [Double] {
-    var result: [Double] = []
-    for i in 0..<count {
-        if let rational = parseRational(tiffData: tiffData, offset: offset + i * 8, byteOrder: byteOrder) {
-            result.append(rational)
-        }
-    }
-    return result
-}
-
-private func convertToDecimalDegrees(degrees: Double, minutes: Double, seconds: Double, ref: String) -> Double {
-    var decimal = degrees + minutes / 60.0 + seconds / 3600.0
-    if ref == "S" || ref == "W" {
-        decimal = -decimal
-    }
-    return decimal
-}
