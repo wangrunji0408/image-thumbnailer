@@ -72,6 +72,13 @@ struct ImageThumbnailCLI: AsyncParsableCommand {
             if let duration = metadata.duration {
                 print("  duration: \(String(format: "%.2f", duration)) seconds")
             }
+            if let location = metadata.location {
+                var locationStr = "  location: \(String(format: "%.6f", location.latitude)), \(String(format: "%.6f", location.longitude))"
+                if let altitude = location.altitude {
+                    locationStr += ", \(String(format: "%.2f", altitude))m"
+                }
+                print(locationStr)
+            }
 
             let thumbnailList = try await reader.getThumbnailList()
             if thumbnailList.isEmpty {
