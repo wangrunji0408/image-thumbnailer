@@ -119,7 +119,7 @@ public class Mp4Reader: ImageReader {
     // Simplified parsing structure for first frame extraction only
     private struct ParsedMoovInfo {
         let trackDimensions: (width: UInt32, height: UInt32)?
-        let duration: Double?
+        let duration: Float?
         let videoTrackInfo: VideoTrackInfo?
         let gpsLocation: GPSLocation?
     }
@@ -349,7 +349,7 @@ public class Mp4Reader: ImageReader {
     }
 
     /// Parse video duration from mvhd box in moov
-    private func parseDuration(moovOffset: UInt64, moovEndOffset: UInt64) async throws -> Double? {
+    private func parseDuration(moovOffset: UInt64, moovEndOffset: UInt64) async throws -> Float? {
         // Look for mvhd box
         guard
             let mvhdBox = try await findBox(
@@ -370,7 +370,7 @@ public class Mp4Reader: ImageReader {
         let durationInTimescale = try await reader.readUInt32(at: mvhdBox.offset + 16)
 
         // Convert to seconds
-        return Double(durationInTimescale) / Double(timescale)
+        return Float(durationInTimescale) / Float(timescale)
     }
 
     /// Prepare first frame info without reading actual data
@@ -904,13 +904,13 @@ extension Mp4Reader {
         // Format can be: +DD.DDDD+DDD.DDDD+AAA.AAA/
         // Where first is latitude, second is longitude, third is altitude
 
-        var components: [Double] = []
+        var components: [Float] = []
         var currentNumber = ""
 
         for char in cleanString {
             if char == "+" || char == "-" {
                 if !currentNumber.isEmpty {
-                    if let value = Double(currentNumber) {
+                    if let value = Float(currentNumber) {
                         components.append(value)
                     }
                     currentNumber = ""
@@ -923,7 +923,7 @@ extension Mp4Reader {
 
         // Add last component
         if !currentNumber.isEmpty {
-            if let value = Double(currentNumber) {
+            if let value = Float(currentNumber) {
                 components.append(value)
             }
         }

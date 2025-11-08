@@ -14,11 +14,11 @@ func parseGPSIFD(reader: Reader, exifOffset: UInt64, gpsIFDOffset: UInt64) async
     logger.debug("Parsing GPS IFD at offset \(offset), entryCount: \(entryCount)")
 
     var latitudeRef: String?
-    var latitudeData: [Double]?
+    var latitudeData: [Float]?
     var longitudeRef: String?
-    var longitudeData: [Double]?
+    var longitudeData: [Float]?
     var altitudeRef: UInt8?
-    var altitude: Double = 0.0
+    var altitude: Float = 0.0
 
     for i in 0..<Int(entryCount) {
         let entryOffset = offset + 2 + UInt64(i) * 12
@@ -90,18 +90,18 @@ func parseGPSIFD(reader: Reader, exifOffset: UInt64, gpsIFDOffset: UInt64) async
 }
 
 /// Parse RATIONAL value (numerator/denominator)
-private func parseRational(reader: Reader, at offset: UInt64) async throws -> Double {
+private func parseRational(reader: Reader, at offset: UInt64) async throws -> Float {
     let numerator = try await reader.readUInt32(at: offset)
     let denominator = try await reader.readUInt32(at: offset + 4)
     guard denominator != 0 else { return 0 }
-    return Double(numerator) / Double(denominator)
+    return Float(numerator) / Float(denominator)
 }
 
 /// Parse array of RATIONAL values
 private func parseRationalArray(reader: Reader, at offset: UInt64, count: Int) async throws
-    -> [Double]
+    -> [Float]
 {
-    var result: [Double] = []
+    var result: [Float] = []
     for i in 0..<count {
         let rational = try await parseRational(reader: reader, at: offset + UInt64(i * 8))
         result.append(rational)
@@ -110,8 +110,8 @@ private func parseRationalArray(reader: Reader, at offset: UInt64, count: Int) a
 }
 
 /// Convert GPS degrees/minutes/seconds to decimal degrees
-private func convertToDecimalDegrees(degrees: Double, minutes: Double, seconds: Double, ref: String)
-    -> Double
+private func convertToDecimalDegrees(degrees: Float, minutes: Float, seconds: Float, ref: String)
+    -> Float
 {
     var decimal = degrees + minutes / 60.0 + seconds / 3600.0
     if ref == "S" || ref == "W" {
