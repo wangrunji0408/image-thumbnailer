@@ -57,13 +57,14 @@ public class HeifReader: ImageReader {
     }
 
     private func loadMetadata() async throws {
-        guard let metaData = try await readMetaBox(reader: reader) else {
+        guard let (metaOffset, metaSize) = try await readMetaBox() else {
             logger.error("Meta box not found")
             throw ImageReaderError.invalidData
         }
 
         // Parse the meta box once to get both thumbnails and primary image metadata
-        let (thumbnails, primaryMetadata, exifLocationInfo) = try await parseMetaBoxForBoth(data: metaData)
+        let (thumbnails, primaryMetadata, exifLocationInfo) = try await parseMetaBoxForBoth(
+            offset: metaOffset, size: metaSize)
 
         thumbnailInfos = thumbnails
 
@@ -84,10 +85,12 @@ public class HeifReader: ImageReader {
         }
     }
 
-    private func parseMetaBoxForBoth(data: Data) async throws -> (
+    // MARK: - Meta Box Parsing
+
+    private func parseMetaBoxForBoth(offset: UInt64, size: UInt32) async throws -> (
         [HeifThumbnailEntry], (width: UInt32?, height: UInt32?), ItemLocation?
     ) {
-        var offset: UInt64 = 12  // Skip meta box header + version/flags
+        var currentOffset: UInt64 = offset + 12  // Skip meta box header + version/flags
 
         var items: [ItemInfo] = []
         var locations: [ItemLocation] = []
@@ -96,37 +99,43 @@ public class HeifReader: ImageReader {
         var properties: [ItemProperty] = []
         var propertyAssociations: [ItemPropertyAssociation] = []
 
-        logger.debug("Parsing meta box, data size: \(data.count) bytes")
+        logger.debug("Parsing meta box at offset \(offset), size: \(size) bytes")
+
+        let endOffset = offset + UInt64(size)
 
         // Parse all sub-boxes
-        while offset + 8 < data.count {
-            let savedOffset = offset
-            guard let (boxSize, boxType) = parseBoxHeader(data: data, offset: &offset) else {
+        while currentOffset + 8 < endOffset {
+            let boxHeaderOffset = currentOffset
+            guard let (boxSize, boxType) = try await parseBoxHeader(offset: currentOffset) else {
                 break
             }
+            currentOffset += 8
 
-            let boxData = data.subdata(
-                in: Int(savedOffset + 8)..<min(Int(savedOffset + UInt64(boxSize)), data.count))
+            let boxDataOffset = currentOffset
+            let boxDataSize = boxSize > 8 ? boxSize - 8 : 0
 
             switch boxType {
             case "pitm":
-                primaryItemId = parsePrimaryItem(data: boxData) ?? 0
+                primaryItemId =
+                    try await parsePrimaryItem(offset: boxDataOffset, size: boxDataSize) ?? 0
                 logger.debug("Primary item ID: \(primaryItemId)")
 
             case "iinf":
-                items = parseItemInfo(data: boxData)
+                items = try await parseItemInfo(offset: boxDataOffset, size: boxDataSize)
                 logger.debug("Found \(items.count) items")
 
             case "iloc":
-                locations = parseItemLocation(data: boxData)
+                locations = try await parseItemLocation(offset: boxDataOffset, size: boxDataSize)
                 logger.debug("Found \(locations.count) locations")
 
             case "iref":
-                thumbnailReferences = parseItemReference(data: boxData)
+                thumbnailReferences = try await parseItemReference(
+                    offset: boxDataOffset, size: boxDataSize)
                 logger.debug("Found \(thumbnailReferences.count) references")
 
             case "iprp":
-                (properties, propertyAssociations) = parseItemProperties(data: boxData)
+                (properties, propertyAssociations) = try await parseItemProperties(
+                    offset: boxDataOffset, size: boxDataSize)
                 logger.debug(
                     "Found \(properties.count) properties, \(propertyAssociations.count) associations"
                 )
@@ -135,7 +144,7 @@ public class HeifReader: ImageReader {
                 logger.debug("Skipping box type: \(boxType)")
             }
 
-            offset = boxSize > 8 ? savedOffset + UInt64(boxSize) : UInt64(data.count)
+            currentOffset = boxSize > 8 ? boxHeaderOffset + UInt64(boxSize) : endOffset
         }
 
         // Build thumbnail infos
@@ -168,19 +177,18 @@ public class HeifReader: ImageReader {
         return (thumbnails, (width, height), exifLocationInfo)
     }
 
-    // Parse EXIF data for GPS using Reader
+    // MARK: - EXIF Parsing
+
     private func parseExifForGPS(exifOffset: UInt64) async throws -> GPSLocation? {
         // HEIF EXIF data starts with a 4-byte offset header
         let offsetHeader = try await reader.readUInt32(at: exifOffset)
         let tiffOffset = exifOffset + 4 + UInt64(offsetHeader)
 
         // Parse TIFF header to determine byte order
-        let byteOrderMark = try await reader.read(at: tiffOffset, length: 2)
-        guard byteOrderMark.count == 2 else { return nil }
-
-        if byteOrderMark[0] == 0x49 && byteOrderMark[1] == 0x49 {  // "II" - little endian
+        let byteOrderMark = try await reader.readString(at: tiffOffset, length: 2)
+        if byteOrderMark == "II" {  // little endian
             reader.setByteOrder(.littleEndian)
-        } else if byteOrderMark[0] == 0x4D && byteOrderMark[1] == 0x4D {  // "MM" - big endian
+        } else if byteOrderMark == "MM" {  // big endian
             reader.setByteOrder(.bigEndian)
         } else {
             return nil
@@ -204,7 +212,6 @@ public class HeifReader: ImageReader {
         return nil
     }
 
-    // Find GPS IFD offset in an IFD
     private func findGPSIFDInIFD(ifdOffset: UInt64) async throws -> UInt32? {
         let entryCount = try await reader.readUInt16(at: ifdOffset)
 
@@ -219,6 +226,540 @@ public class HeifReader: ImageReader {
         }
 
         return nil
+    }
+
+    // MARK: - Box Parsing Utilities
+
+    private func parseBoxHeader(offset: UInt64) async throws -> (UInt32, String)? {
+        let size = try await reader.readUInt32(at: offset)
+        let type = try await reader.readString(at: offset + 4, length: 4)
+
+        return (size, type)
+    }
+
+    private func parsePrimaryItem(offset: UInt64, size: UInt32) async throws -> UInt32? {
+        guard size >= 6 else { return nil }
+        return UInt32(try await reader.readUInt16(at: offset + 4))
+    }
+
+    private func parseItemInfo(offset: UInt64, size: UInt32) async throws -> [ItemInfo] {
+        var items: [ItemInfo] = []
+        var currentOffset = offset + 4  // Skip version/flags
+
+        guard size >= 6 else { return items }
+
+        let entryCount = try await reader.readUInt16(at: currentOffset)
+        currentOffset += 2
+
+        for _ in 0..<entryCount {
+            let boxHeaderOffset = currentOffset
+            guard let (infeSize, infeType) = try await parseBoxHeader(offset: currentOffset),
+                infeType == "infe", infeSize > 8
+            else {
+                break
+            }
+
+            let infeDataOffset = currentOffset + 8
+            let infeDataSize = infeSize - 8
+
+            if let item = try await parseInfeBox(offset: infeDataOffset, size: infeDataSize) {
+                items.append(item)
+            }
+
+            currentOffset = boxHeaderOffset + UInt64(infeSize)
+        }
+
+        return items
+    }
+
+    private func parseInfeBox(offset: UInt64, size: UInt32) async throws -> ItemInfo? {
+        guard size >= 12 else { return nil }
+
+        let itemId = UInt32(try await reader.readUInt16(at: offset + 4))
+        let itemType = try await reader.readString(at: offset + 8, length: 4)
+
+        return ItemInfo(itemId: itemId, itemType: itemType, itemName: nil)
+    }
+
+    private func parseItemLocation(offset: UInt64, size: UInt32) async throws -> [ItemLocation] {
+        var locations: [ItemLocation] = []
+        var currentOffset = offset + 4  // Skip version/flags
+
+        guard size > 0 else { return locations }
+
+        let version = try await reader.readUInt8(at: offset)
+        let values4 = try await reader.readUInt16(at: currentOffset)
+
+        let offsetSize = (values4 >> 12) & 0xF
+        let lengthSize = (values4 >> 8) & 0xF
+        let baseOffsetSize = (values4 >> 4) & 0xF
+        let indexSize = (version >= 1) ? (values4 & 0xF) : 0
+
+        currentOffset += 2
+
+        // Read item count
+        let itemCount: UInt32
+        if version < 2 {
+            itemCount = UInt32(try await reader.readUInt16(at: currentOffset))
+            currentOffset += 2
+        } else {
+            itemCount = try await reader.readUInt32(at: currentOffset)
+            currentOffset += 4
+        }
+
+        for _ in 0..<itemCount {
+            if let location = try await parseItemLocationEntry(
+                offset: currentOffset,
+                version: version,
+                offsetSize: offsetSize,
+                lengthSize: lengthSize,
+                baseOffsetSize: baseOffsetSize,
+                indexSize: indexSize,
+                nextOffset: &currentOffset
+            ) {
+                locations.append(location)
+            } else {
+                break
+            }
+        }
+
+        return locations
+    }
+
+    private func parseItemLocationEntry(
+        offset: UInt64,
+        version: UInt8,
+        offsetSize: UInt16,
+        lengthSize: UInt16,
+        baseOffsetSize: UInt16,
+        indexSize: UInt16,
+        nextOffset: inout UInt64
+    ) async throws -> ItemLocation? {
+        var currentOffset = offset
+
+        // Read item ID
+        let itemId: UInt32
+        if version < 2 {
+            itemId = UInt32(try await reader.readUInt16(at: currentOffset))
+            currentOffset += 2
+        } else {
+            itemId = try await reader.readUInt32(at: currentOffset)
+            currentOffset += 4
+        }
+
+        // Skip construction_method, data_reference_index, base_offset
+        let skipSize = UInt64((version >= 1 ? 2 : 0) + 2 + Int(baseOffsetSize))
+        currentOffset += skipSize
+
+        // Read extent count
+        let extentCount = try await reader.readUInt16(at: currentOffset)
+        currentOffset += 2
+
+        guard extentCount > 0 else { return nil }
+
+        // Skip extent_index
+        currentOffset += UInt64(indexSize)
+
+        // Read extent_offset
+        let itemOffset: UInt32
+        if offsetSize == 4 {
+            itemOffset = try await reader.readUInt32(at: currentOffset)
+            currentOffset += 4
+        } else if offsetSize == 8 {
+            let offset64 = try await reader.readUInt64(at: currentOffset)
+            itemOffset = UInt32(offset64 & 0xFFFF_FFFF)
+            currentOffset += 8
+        } else {
+            return nil
+        }
+
+        // Read extent_length
+        let itemLength: UInt32
+        if lengthSize == 4 {
+            itemLength = try await reader.readUInt32(at: currentOffset)
+            currentOffset += 4
+        } else if lengthSize == 8 {
+            let length64 = try await reader.readUInt64(at: currentOffset)
+            itemLength = UInt32(length64 & 0xFFFF_FFFF)
+            currentOffset += 8
+        } else {
+            return nil
+        }
+
+        // Skip remaining extents
+        let extentSize = UInt64(indexSize + offsetSize + lengthSize)
+        let remainingExtents = Int(extentCount) - 1
+        if remainingExtents > 0 {
+            currentOffset += UInt64(remainingExtents) * extentSize
+        }
+
+        nextOffset = currentOffset
+        return ItemLocation(itemId: itemId, offset: itemOffset, length: itemLength)
+    }
+
+    private func parseItemReference(offset: UInt64, size: UInt32) async throws -> [(
+        from: UInt32, to: [UInt32]
+    )] {
+        var references: [(from: UInt32, to: [UInt32])] = []
+        var currentOffset = offset + 4  // Skip version/flags
+
+        let version = try await reader.readUInt8(at: offset)
+        let idSize = (version == 0) ? 2 : 4
+
+        let endOffset = offset + UInt64(size)
+
+        while currentOffset + 8 < endOffset {
+            let refBoxSize = try await reader.readUInt32(at: currentOffset)
+            let refBoxType = try await reader.readString(at: currentOffset + 4, length: 4)
+
+            currentOffset += 8
+
+            if refBoxType == "thmb" {
+                if let reference = try await parseThumbnailReference(
+                    offset: currentOffset,
+                    idSize: idSize,
+                    nextOffset: &currentOffset
+                ) {
+                    references.append(reference)
+                }
+            } else if refBoxSize > 8 {
+                currentOffset += UInt64(refBoxSize) - 8
+            } else {
+                break
+            }
+        }
+
+        return references
+    }
+
+    private func parseThumbnailReference(
+        offset: UInt64,
+        idSize: Int,
+        nextOffset: inout UInt64
+    ) async throws -> (from: UInt32, to: [UInt32])? {
+        var currentOffset = offset
+
+        // Read from_item_ID
+        let fromItemId: UInt32 =
+            if idSize == 2 {
+                UInt32(try await reader.readUInt16(at: currentOffset))
+            } else {
+                try await reader.readUInt32(at: currentOffset)
+            }
+        currentOffset += UInt64(idSize)
+
+        // Read reference count
+        let refCount = try await reader.readUInt16(at: currentOffset)
+        currentOffset += 2
+
+        // Read to_item_IDs
+        var toItemIds: [UInt32] = []
+        for _ in 0..<refCount {
+            let toItemId: UInt32 =
+                if idSize == 2 {
+                    UInt32(try await reader.readUInt16(at: currentOffset))
+                } else {
+                    try await reader.readUInt32(at: currentOffset)
+                }
+            toItemIds.append(toItemId)
+            currentOffset += UInt64(idSize)
+        }
+
+        nextOffset = currentOffset
+        return (from: fromItemId, to: toItemIds)
+    }
+
+    private func parseItemProperties(offset: UInt64, size: UInt32) async throws -> (
+        [ItemProperty], [ItemPropertyAssociation]
+    ) {
+        var properties: [ItemProperty] = []
+        var associations: [ItemPropertyAssociation] = []
+        var currentOffset = offset
+
+        let endOffset = offset + UInt64(size)
+
+        while currentOffset + 8 < endOffset {
+            let boxHeaderOffset = currentOffset
+            guard let (boxSize, boxType) = try await parseBoxHeader(offset: currentOffset) else {
+                break
+            }
+
+            let boxDataOffset = currentOffset + 8
+            let boxDataSize = boxSize > 8 ? boxSize - 8 : 0
+
+            switch boxType {
+            case "ipco":
+                properties = try await parseItemPropertyContainer(
+                    offset: boxDataOffset, size: boxDataSize)
+            case "ipma":
+                associations = try await parseItemPropertyAssociation(
+                    offset: boxDataOffset, size: boxDataSize)
+            default:
+                break
+            }
+
+            currentOffset = boxHeaderOffset + UInt64(boxSize)
+        }
+
+        return (properties, associations)
+    }
+
+    private func parseItemPropertyContainer(offset: UInt64, size: UInt32) async throws
+        -> [ItemProperty]
+    {
+        var properties: [ItemProperty] = []
+        var currentOffset = offset
+        var propertyIndex: UInt32 = 1
+
+        let endOffset = offset + UInt64(size)
+
+        while currentOffset + 8 < endOffset {
+            let boxHeaderOffset = currentOffset
+            guard let (boxSize, boxType) = try await parseBoxHeader(offset: currentOffset) else {
+                break
+            }
+
+            let boxDataOffset = currentOffset + 8
+            let boxDataSize = boxSize > 8 ? boxSize - 8 : 0
+
+            let rotation =
+                (boxType == "irot")
+                ? try await parseIrotBox(offset: boxDataOffset, size: boxDataSize) : nil
+            let boxSize2D =
+                (boxType == "ispe")
+                ? try await parseIspeBox(offset: boxDataOffset, size: boxDataSize) : nil
+
+            // Read raw data for this property box
+            let rawData = try await reader.read(at: boxDataOffset, length: boxDataSize)
+
+            let property = ItemProperty(
+                propertyIndex: propertyIndex,
+                propertyType: boxType,
+                rotation: rotation,
+                width: boxSize2D?.width,
+                height: boxSize2D?.height,
+                rawData: rawData
+            )
+            properties.append(property)
+
+            propertyIndex += 1
+            currentOffset = boxHeaderOffset + UInt64(boxSize)
+        }
+
+        return properties
+    }
+
+    private func parseIrotBox(offset: UInt64, size: UInt32) async throws -> Int? {
+        guard size >= 1 else { return nil }
+        let data = try await reader.readUInt8(at: offset)
+        return Int(data & 0x03) * 90
+    }
+
+    private func parseIspeBox(offset: UInt64, size: UInt32) async throws -> (
+        width: UInt32, height: UInt32
+    )? {
+        guard size >= 12 else { return nil }
+
+        let width = try await reader.readUInt32(at: offset + 4)
+        let height = try await reader.readUInt32(at: offset + 8)
+
+        return (width: width, height: height)
+    }
+
+    private func parseItemPropertyAssociation(offset: UInt64, size: UInt32) async throws
+        -> [ItemPropertyAssociation]
+    {
+        var associations: [ItemPropertyAssociation] = []
+        var currentOffset = offset + 4  // Skip version/flags
+
+        guard size >= 8 else { return associations }
+
+        let entryCount = try await reader.readUInt32(at: currentOffset)
+        currentOffset += 4
+
+        for _ in 0..<entryCount {
+            let itemId = UInt32(try await reader.readUInt16(at: currentOffset))
+            currentOffset += 2
+
+            let associationCount = try await reader.readUInt8(at: currentOffset)
+            currentOffset += 1
+
+            var propertyIndices: [UInt32] = []
+            for _ in 0..<associationCount {
+                let propertyIndexData = try await reader.readUInt8(at: currentOffset)
+                let propertyIndex = UInt32(propertyIndexData & 0x7F)
+                propertyIndices.append(propertyIndex)
+                currentOffset += 1
+            }
+
+            associations.append(
+                ItemPropertyAssociation(itemId: itemId, propertyIndices: propertyIndices))
+        }
+
+        return associations
+    }
+
+    // MARK: - Thumbnail Building
+
+    private func buildThumbnailInfos(
+        items: [ItemInfo],
+        locations: [ItemLocation],
+        primaryItemId: UInt32,
+        thumbnailReferences: [(from: UInt32, to: [UInt32])],
+        properties: [ItemProperty],
+        propertyAssociations: [ItemPropertyAssociation]
+    ) -> [HeifThumbnailEntry] {
+        var thumbnailCandidates: [HeifThumbnailEntry] = []
+
+        for (thumbnailId, masterIds) in thumbnailReferences {
+            guard masterIds.contains(primaryItemId),
+                let item = items.first(where: { $0.itemId == thumbnailId }),
+                let location = locations.first(where: { $0.itemId == thumbnailId })
+            else {
+                continue
+            }
+
+            let (rotation, width, height, associatedProperties) = extractItemProperties(
+                itemId: thumbnailId,
+                properties: properties,
+                propertyAssociations: propertyAssociations
+            )
+
+            let thumbnail = HeifThumbnailEntry(
+                itemId: thumbnailId,
+                offset: location.offset,
+                size: location.length,
+                rotation: rotation,
+                width: width ?? 0,
+                height: height ?? 0,
+                type: item.itemType,
+                properties: associatedProperties
+            )
+
+            thumbnailCandidates.append(thumbnail)
+            logger.debug(
+                "Found thumbnail: itemId=\(thumbnailId), type=\(item.itemType), size=\(width ?? 0)x\(height ?? 0)"
+            )
+        }
+
+        return thumbnailCandidates
+    }
+
+    private func extractItemProperties(
+        itemId: UInt32,
+        properties: [ItemProperty],
+        propertyAssociations: [ItemPropertyAssociation]
+    ) -> (rotation: Int?, width: UInt32?, height: UInt32?, properties: [ItemProperty]) {
+        guard let association = propertyAssociations.first(where: { $0.itemId == itemId }) else {
+            return (nil, nil, nil, [])
+        }
+
+        var rotation: Int?
+        var width: UInt32?
+        var height: UInt32?
+        var associatedProperties: [ItemProperty] = []
+
+        for propertyIndex in association.propertyIndices {
+            guard let property = properties.first(where: { $0.propertyIndex == propertyIndex })
+            else {
+                continue
+            }
+
+            associatedProperties.append(property)
+
+            switch property.propertyType {
+            case "irot":
+                rotation = property.rotation
+            case "ispe":
+                width = property.width
+                height = property.height
+            default:
+                break
+            }
+        }
+
+        return (rotation, width, height, associatedProperties)
+    }
+
+    // MARK: - Meta Box Location
+
+    private func readMetaBox() async throws -> (offset: UInt64, size: UInt32)? {
+        // Read initial header with prefetch for better performance
+        try await reader.prefetch(at: 0, length: 4096)
+        let data = try await reader.read(at: 0, length: 4096)
+        guard data.count >= 8 else { return nil }
+
+        var offset: UInt64 = 0
+
+        // Validate ftyp box
+        guard let (ftypSize, ftypType) = try await parseBoxHeader(offset: offset),
+            ftypType == "ftyp"
+        else {
+            logger.error("Invalid HEIC file: missing ftyp box")
+            return nil
+        }
+
+        // Verify HEIC brand
+        if ftypSize >= 12 {
+            let brand = try await reader.readString(at: offset + 8, length: 4)
+            guard brand.hasPrefix("hei") else {
+                logger.error("Not a HEIC file, brand: \(brand)")
+                return nil
+            }
+            logger.debug("Detected HEIC file, brand: \(brand)")
+        }
+
+        offset = UInt64(ftypSize)
+
+        // Search for meta box with optimized reading
+        while offset + 8 < 65536 {  // Limit search to reasonable file header size
+            // Ensure we have enough data in buffer
+            if offset + 8 > data.count {
+                try await reader.prefetch(at: offset, length: 8192)
+            }
+
+            guard let (boxSize, boxType) = try await parseBoxHeader(offset: offset) else {
+                break
+            }
+
+            if boxType == "meta" {
+                logger.debug("Found meta box: offset=\(offset), size=\(boxSize)")
+
+                // Prefetch the entire meta box for efficient parsing
+                try await reader.prefetch(at: offset, length: boxSize)
+                return (offset, boxSize)
+            }
+
+            if boxSize <= 8 {
+                offset += 8
+            } else {
+                offset += UInt64(boxSize)
+            }
+        }
+
+        return nil
+    }
+
+    // MARK: - Thumbnail Creation
+
+    private func createThumbnail(from info: HeifThumbnailEntry, data: Data) async throws -> Data {
+        switch info.type {
+        case "jpeg":
+            logger.debug("Processing JPEG thumbnail")
+            return data
+
+        case "hvc1":
+            logger.debug("Processing HEVC thumbnail")
+            guard let heicData = try await createHEICFromHEVC(info, hevcData: data) else {
+                logger.error("Failed to create HEIC from HEVC")
+                throw ImageReaderError.invalidData
+            }
+            return heicData
+
+        default:
+            logger.error("Unsupported thumbnail type: \(info.type)")
+            throw ImageReaderError.unsupportedFormat
+        }
     }
 }
 
@@ -260,616 +801,3 @@ private struct ItemPropertyAssociation {
     let itemId: UInt32
     let propertyIndices: [UInt32]
 }
-
-// MARK: - HEIC Format Validation
-
-private func readMetaBox(reader: Reader) async throws -> Data? {
-    // Read initial header with prefetch for better performance
-    try await reader.prefetch(at: 0, length: 4096)
-    let data = try await reader.read(at: 0, length: 4096)
-    guard data.count >= 8 else { return nil }
-
-    var offset: UInt64 = 0
-
-    // Validate ftyp box
-    guard let (ftypSize, ftypType) = parseBoxHeader(data: data, offset: &offset),
-        ftypType == "ftyp"
-    else {
-        logger.error("Invalid HEIC file: missing ftyp box")
-        return nil
-    }
-
-    // Verify HEIC brand
-    if ftypSize >= 12, offset + 4 <= data.count {
-        let brandData = data.subdata(in: Int(offset)..<Int(offset + 4))
-        let brand = String(data: brandData, encoding: .ascii) ?? ""
-        guard brand.hasPrefix("hei") else {
-            logger.error("Not a HEIC file, brand: \(brand)")
-            return nil
-        }
-        logger.debug("Detected HEIC file, brand: \(brand)")
-    }
-
-    offset = UInt64(ftypSize)
-
-    // Search for meta box with optimized reading
-    while offset + 8 < 65536 {  // Limit search to reasonable file header size
-        // Ensure we have enough data in buffer
-        if offset + 8 > data.count {
-            try await reader.prefetch(at: offset, length: 8192)
-        }
-
-        let headerData = try await reader.read(at: offset, length: 8)
-        guard headerData.count == 8 else { break }
-
-        let boxSize = headerData.subdata(in: 0..<4).withUnsafeBytes {
-            $0.load(as: UInt32.self).bigEndian
-        }
-        let boxType = String(data: headerData.subdata(in: 4..<8), encoding: .ascii) ?? ""
-
-        if boxType == "meta" {
-            logger.debug("Found meta box: offset=\(offset), size=\(boxSize)")
-
-            // Prefetch the entire meta box for efficient parsing
-            try await reader.prefetch(at: offset, length: UInt32(boxSize))
-            return try await reader.read(at: offset, length: boxSize)
-        }
-
-        if boxSize <= 8 {
-            offset += 8
-        } else {
-            offset += UInt64(boxSize)
-        }
-    }
-
-    return nil
-}
-
-// MARK: - Meta Box Parsing
-
-private func parseMetaBox(data: Data) -> [HeifThumbnailEntry] {
-    var offset: UInt64 = 12  // Skip meta box header + version/flags
-
-    var items: [ItemInfo] = []
-    var locations: [ItemLocation] = []
-    var primaryItemId: UInt32 = 0
-    var thumbnailReferences: [(from: UInt32, to: [UInt32])] = []
-    var properties: [ItemProperty] = []
-    var propertyAssociations: [ItemPropertyAssociation] = []
-
-    logger.debug("Parsing meta box, data size: \(data.count) bytes")
-
-    // Parse all sub-boxes
-    while offset + 8 < data.count {
-        let savedOffset = offset
-        guard let (boxSize, boxType) = parseBoxHeader(data: data, offset: &offset) else { break }
-
-        let boxData = data.subdata(
-            in: Int(savedOffset + 8)..<min(Int(savedOffset + UInt64(boxSize)), data.count))
-
-        switch boxType {
-        case "pitm":
-            primaryItemId = parsePrimaryItem(data: boxData) ?? 0
-            logger.debug("Primary item ID: \(primaryItemId)")
-
-        case "iinf":
-            items = parseItemInfo(data: boxData)
-            logger.debug("Found \(items.count) items")
-
-        case "iloc":
-            locations = parseItemLocation(data: boxData)
-            logger.debug("Found \(locations.count) locations")
-
-        case "iref":
-            thumbnailReferences = parseItemReference(data: boxData)
-            logger.debug("Found \(thumbnailReferences.count) references")
-
-        case "iprp":
-            (properties, propertyAssociations) = parseItemProperties(data: boxData)
-            logger.debug(
-                "Found \(properties.count) properties, \(propertyAssociations.count) associations")
-
-        default:
-            logger.debug("Skipping box type: \(boxType)")
-        }
-
-        offset = boxSize > 8 ? savedOffset + UInt64(boxSize) : UInt64(data.count)
-    }
-
-    return buildThumbnailInfos(
-        items: items,
-        locations: locations,
-        primaryItemId: primaryItemId,
-        thumbnailReferences: thumbnailReferences,
-        properties: properties,
-        propertyAssociations: propertyAssociations
-    )
-}
-
-private func buildThumbnailInfos(
-    items: [ItemInfo],
-    locations: [ItemLocation],
-    primaryItemId: UInt32,
-    thumbnailReferences: [(from: UInt32, to: [UInt32])],
-    properties: [ItemProperty],
-    propertyAssociations: [ItemPropertyAssociation]
-) -> [HeifThumbnailEntry] {
-    var thumbnailCandidates: [HeifThumbnailEntry] = []
-
-    for (thumbnailId, masterIds) in thumbnailReferences {
-        guard masterIds.contains(primaryItemId),
-            let item = items.first(where: { $0.itemId == thumbnailId }),
-            let location = locations.first(where: { $0.itemId == thumbnailId })
-        else {
-            continue
-        }
-
-        let (rotation, width, height, associatedProperties) = extractItemProperties(
-            itemId: thumbnailId,
-            properties: properties,
-            propertyAssociations: propertyAssociations
-        )
-
-        let thumbnail = HeifThumbnailEntry(
-            itemId: thumbnailId,
-            offset: location.offset,
-            size: location.length,
-            rotation: rotation,
-            width: width ?? 0,
-            height: height ?? 0,
-            type: item.itemType,
-            properties: associatedProperties
-        )
-
-        thumbnailCandidates.append(thumbnail)
-        logger.debug(
-            "Found thumbnail: itemId=\(thumbnailId), type=\(item.itemType), size=\(width ?? 0)x\(height ?? 0)"
-        )
-    }
-
-    return thumbnailCandidates
-}
-
-private func extractItemProperties(
-    itemId: UInt32,
-    properties: [ItemProperty],
-    propertyAssociations: [ItemPropertyAssociation]
-) -> (rotation: Int?, width: UInt32?, height: UInt32?, properties: [ItemProperty]) {
-    guard let association = propertyAssociations.first(where: { $0.itemId == itemId }) else {
-        return (nil, nil, nil, [])
-    }
-
-    var rotation: Int?
-    var width: UInt32?
-    var height: UInt32?
-    var associatedProperties: [ItemProperty] = []
-
-    for propertyIndex in association.propertyIndices {
-        guard let property = properties.first(where: { $0.propertyIndex == propertyIndex }) else {
-            continue
-        }
-
-        associatedProperties.append(property)
-
-        switch property.propertyType {
-        case "irot":
-            rotation = property.rotation
-        case "ispe":
-            width = property.width
-            height = property.height
-        default:
-            break
-        }
-    }
-
-    return (rotation, width, height, associatedProperties)
-}
-
-// MARK: - Box Parsing Utilities
-
-private func parseBoxHeader(data: Data, offset: inout UInt64) -> (UInt32, String)? {
-    guard offset + 8 <= data.count else { return nil }
-
-    let size = data.subdata(in: Int(offset)..<Int(offset + 4))
-        .withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
-    let type =
-        String(data: data.subdata(in: Int(offset + 4)..<Int(offset + 8)), encoding: .ascii) ?? ""
-
-    offset += 8
-    return (size, type)
-}
-
-private func parsePrimaryItem(data: Data) -> UInt32? {
-    guard data.count >= 6 else { return nil }
-    return data.subdata(in: 4..<6)
-        .withUnsafeBytes { UInt32($0.load(as: UInt16.self).bigEndian) }
-}
-
-private func parseItemInfo(data: Data) -> [ItemInfo] {
-    var items: [ItemInfo] = []
-    var offset = 4  // Skip version/flags
-
-    guard offset + 2 < data.count else { return items }
-
-    let entryCount = data.subdata(in: offset..<offset + 2)
-        .withUnsafeBytes { $0.load(as: UInt16.self).bigEndian }
-    offset += 2
-
-    for _ in 0..<entryCount {
-        guard offset + 8 < data.count else { break }
-
-        let savedOffset = offset
-        var localOffset = UInt64(offset)
-        guard let (infeSize, infeType) = parseBoxHeader(data: data, offset: &localOffset),
-            infeType == "infe", infeSize > 8
-        else {
-            break
-        }
-
-        let infeData = data.subdata(
-            in: Int(localOffset)..<min(Int(savedOffset + Int(infeSize)), data.count))
-        if let item = parseInfeBox(data: infeData) {
-            items.append(item)
-        }
-
-        offset = savedOffset + Int(infeSize)
-    }
-
-    return items
-}
-
-private func parseInfeBox(data: Data) -> ItemInfo? {
-    guard data.count >= 8 else { return nil }
-
-    let itemId = data.subdata(in: 4..<6)
-        .withUnsafeBytes { UInt32($0.load(as: UInt16.self).bigEndian) }
-
-    guard data.count >= 12 else { return nil }
-    let itemType = String(data: data.subdata(in: 8..<12), encoding: .ascii) ?? ""
-
-    return ItemInfo(itemId: itemId, itemType: itemType, itemName: nil)
-}
-
-private func parseItemLocation(data: Data) -> [ItemLocation] {
-    var locations: [ItemLocation] = []
-    var offset = 4  // Skip version/flags
-
-    guard data.count > 0, offset + 2 < data.count else { return locations }
-
-    let version = data[0]
-    let values4 = data.subdata(in: offset..<offset + 2)
-        .withUnsafeBytes { $0.load(as: UInt16.self).bigEndian }
-
-    let offsetSize = (values4 >> 12) & 0xF
-    let lengthSize = (values4 >> 8) & 0xF
-    let baseOffsetSize = (values4 >> 4) & 0xF
-    let indexSize = (version >= 1) ? (values4 & 0xF) : 0
-
-    offset += 2
-
-    // Read item count
-    let itemCount: UInt32
-    if version < 2 {
-        guard offset + 2 <= data.count else { return locations }
-        itemCount = UInt32(
-            data.subdata(in: offset..<offset + 2)
-                .withUnsafeBytes { $0.load(as: UInt16.self).bigEndian })
-        offset += 2
-    } else {
-        guard offset + 4 <= data.count else { return locations }
-        itemCount = data.subdata(in: offset..<offset + 4)
-            .withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
-        offset += 4
-    }
-
-    for _ in 0..<itemCount {
-        guard
-            let location = parseItemLocationEntry(
-                data: data,
-                offset: &offset,
-                version: version,
-                offsetSize: offsetSize,
-                lengthSize: lengthSize,
-                baseOffsetSize: baseOffsetSize,
-                indexSize: indexSize
-            )
-        else { break }
-
-        locations.append(location)
-    }
-
-    return locations
-}
-
-private func parseItemLocationEntry(
-    data: Data,
-    offset: inout Int,
-    version: UInt8,
-    offsetSize: UInt16,
-    lengthSize: UInt16,
-    baseOffsetSize: UInt16,
-    indexSize: UInt16
-) -> ItemLocation? {
-    // Read item ID
-    let itemId: UInt32
-    if version < 2 {
-        guard offset + 2 <= data.count else { return nil }
-        itemId = UInt32(
-            data.subdata(in: offset..<offset + 2)
-                .withUnsafeBytes { $0.load(as: UInt16.self).bigEndian })
-        offset += 2
-    } else {
-        guard offset + 4 <= data.count else { return nil }
-        itemId = data.subdata(in: offset..<offset + 4)
-            .withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
-        offset += 4
-    }
-
-    // Skip construction_method, data_reference_index, base_offset
-    let skipSize = (version >= 1 ? 2 : 0) + 2 + Int(baseOffsetSize)
-    guard offset + skipSize <= data.count else { return nil }
-    offset += skipSize
-
-    // Read extent count
-    guard offset + 2 <= data.count else { return nil }
-    let extentCount = data.subdata(in: offset..<offset + 2)
-        .withUnsafeBytes { $0.load(as: UInt16.self).bigEndian }
-    offset += 2
-
-    guard extentCount > 0 else { return nil }
-
-    // Read first extent only
-    let extentSize = Int(indexSize + offsetSize + lengthSize)
-    guard offset + extentSize <= data.count else { return nil }
-
-    offset += Int(indexSize)  // Skip extent_index
-
-    // Read extent_offset
-    let itemOffset: UInt32
-    if offsetSize == 4 {
-        itemOffset = data.subdata(in: offset..<offset + 4)
-            .withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
-        offset += 4
-    } else if offsetSize == 8 {
-        let offset64 = data.subdata(in: offset..<offset + 8)
-            .withUnsafeBytes { $0.load(as: UInt64.self).bigEndian }
-        itemOffset = UInt32(offset64 & 0xFFFF_FFFF)
-        offset += 8
-    } else {
-        return nil
-    }
-
-    // Read extent_length
-    let itemLength: UInt32
-    if lengthSize == 4 {
-        itemLength = data.subdata(in: offset..<offset + 4)
-            .withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
-        offset += 4
-    } else if lengthSize == 8 {
-        let length64 = data.subdata(in: offset..<offset + 8)
-            .withUnsafeBytes { $0.load(as: UInt64.self).bigEndian }
-        itemLength = UInt32(length64 & 0xFFFF_FFFF)
-        offset += 8
-    } else {
-        return nil
-    }
-
-    // Skip remaining extents
-    let remainingExtents = Int(extentCount) - 1
-    if remainingExtents > 0 {
-        offset += remainingExtents * extentSize
-    }
-
-    return ItemLocation(itemId: itemId, offset: itemOffset, length: itemLength)
-}
-
-private func parseItemReference(data: Data) -> [(from: UInt32, to: [UInt32])] {
-    var references: [(from: UInt32, to: [UInt32])] = []
-    var offset = 4  // Skip version/flags
-
-    let version = data.count > 0 ? data[0] : 0
-    let idSize = (version == 0) ? 2 : 4
-
-    while offset + 8 < data.count {
-        guard offset + 8 <= data.count else { break }
-
-        let refBoxSize = data.subdata(in: offset..<offset + 4)
-            .withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
-        let refBoxType =
-            String(data: data.subdata(in: offset + 4..<offset + 8), encoding: .ascii) ?? ""
-
-        offset += 8
-
-        if refBoxType == "thmb",
-            let reference = parseThumbnailReference(data: data, offset: &offset, idSize: idSize)
-        {
-            references.append(reference)
-        } else if refBoxSize > 8 {
-            offset += Int(refBoxSize) - 8
-        } else {
-            break
-        }
-    }
-
-    return references
-}
-
-private func parseThumbnailReference(data: Data, offset: inout Int, idSize: Int) -> (
-    from: UInt32, to: [UInt32]
-)? {
-    guard offset + idSize + 2 <= data.count else { return nil }
-
-    // Read from_item_ID
-    let fromItemId: UInt32 =
-        if idSize == 2 {
-            UInt32(
-                data.subdata(in: offset..<offset + 2)
-                    .withUnsafeBytes { $0.load(as: UInt16.self).bigEndian })
-        } else {
-            data.subdata(in: offset..<offset + 4)
-                .withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
-        }
-    offset += idSize
-
-    // Read reference count
-    let refCount = data.subdata(in: offset..<offset + 2)
-        .withUnsafeBytes { $0.load(as: UInt16.self).bigEndian }
-    offset += 2
-
-    // Read to_item_IDs
-    var toItemIds: [UInt32] = []
-    for _ in 0..<refCount {
-        guard offset + idSize <= data.count else { break }
-
-        let toItemId: UInt32 =
-            if idSize == 2 {
-                UInt32(
-                    data.subdata(in: offset..<offset + 2)
-                        .withUnsafeBytes { $0.load(as: UInt16.self).bigEndian })
-            } else {
-                data.subdata(in: offset..<offset + 4)
-                    .withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
-            }
-        toItemIds.append(toItemId)
-        offset += idSize
-    }
-
-    return (from: fromItemId, to: toItemIds)
-}
-
-private func parseItemProperties(data: Data) -> ([ItemProperty], [ItemPropertyAssociation]) {
-    var properties: [ItemProperty] = []
-    var associations: [ItemPropertyAssociation] = []
-    var offset = 0
-
-    while offset + 8 < data.count {
-        let savedOffset = offset
-        var localOffset = UInt64(offset)
-        guard let (boxSize, boxType) = parseBoxHeader(data: data, offset: &localOffset) else {
-            break
-        }
-
-        let boxData = data.subdata(
-            in: Int(localOffset)..<min(Int(savedOffset + Int(boxSize)), data.count))
-
-        switch boxType {
-        case "ipco":
-            properties = parseItemPropertyContainer(data: boxData)
-        case "ipma":
-            associations = parseItemPropertyAssociation(data: boxData)
-        default:
-            break
-        }
-
-        offset = savedOffset + Int(boxSize)
-    }
-
-    return (properties, associations)
-}
-
-private func parseItemPropertyContainer(data: Data) -> [ItemProperty] {
-    var properties: [ItemProperty] = []
-    var offset = 0
-    var propertyIndex: UInt32 = 1
-
-    while offset + 8 < data.count {
-        let savedOffset = offset
-        var localOffset = UInt64(offset)
-        guard let (boxSize, boxType) = parseBoxHeader(data: data, offset: &localOffset) else {
-            break
-        }
-
-        let boxData = data.subdata(
-            in: Int(localOffset)..<min(Int(savedOffset + Int(boxSize)), data.count))
-
-        let rotation = (boxType == "irot") ? parseIrotBox(data: boxData) : nil
-        let size = (boxType == "ispe") ? parseIspeBox(data: boxData) : nil
-
-        let property = ItemProperty(
-            propertyIndex: propertyIndex,
-            propertyType: boxType,
-            rotation: rotation,
-            width: size?.width,
-            height: size?.height,
-            rawData: boxData
-        )
-        properties.append(property)
-
-        propertyIndex += 1
-        offset = savedOffset + Int(boxSize)
-    }
-
-    return properties
-}
-
-private func parseIrotBox(data: Data) -> Int? {
-    guard data.count >= 1 else { return nil }
-    return Int(data[0] & 0x03) * 90
-}
-
-private func parseIspeBox(data: Data) -> (width: UInt32, height: UInt32)? {
-    guard data.count >= 12 else { return nil }
-
-    let width = data.subdata(in: 4..<8)
-        .withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
-    let height = data.subdata(in: 8..<12)
-        .withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
-
-    return (width: width, height: height)
-}
-
-private func parseItemPropertyAssociation(data: Data) -> [ItemPropertyAssociation] {
-    var associations: [ItemPropertyAssociation] = []
-    var offset = 4  // Skip version/flags
-
-    guard offset + 4 < data.count else { return associations }
-
-    let entryCount = data.subdata(in: offset..<offset + 4)
-        .withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
-    offset += 4
-
-    for _ in 0..<entryCount {
-        guard offset + 3 < data.count else { break }
-
-        let itemId = data.subdata(in: offset..<offset + 2)
-            .withUnsafeBytes { UInt32($0.load(as: UInt16.self).bigEndian) }
-        offset += 2
-
-        let associationCount = data[offset]
-        offset += 1
-
-        var propertyIndices: [UInt32] = []
-        for _ in 0..<associationCount {
-            guard offset < data.count else { break }
-            let propertyIndex = UInt32(data[offset] & 0x7F)
-            propertyIndices.append(propertyIndex)
-            offset += 1
-        }
-
-        associations.append(
-            ItemPropertyAssociation(itemId: itemId, propertyIndices: propertyIndices))
-    }
-
-    return associations
-}
-
-private func createThumbnail(from info: HeifThumbnailEntry, data: Data) async throws -> Data {
-    switch info.type {
-    case "jpeg":
-        logger.debug("Processing JPEG thumbnail")
-        return data
-
-    case "hvc1":
-        logger.debug("Processing HEVC thumbnail")
-        guard let heicData = try await createHEICFromHEVC(info, hevcData: data) else {
-            logger.error("Failed to create HEIC from HEVC")
-            throw ImageReaderError.invalidData
-        }
-        return heicData
-
-    default:
-        logger.error("Unsupported thumbnail type: \(info.type)")
-        throw ImageReaderError.unsupportedFormat
-    }
-}
-
