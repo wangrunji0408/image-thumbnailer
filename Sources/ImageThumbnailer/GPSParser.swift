@@ -18,7 +18,7 @@ func parseGPSIFD(reader: Reader, exifOffset: UInt64, gpsIFDOffset: UInt64) async
     var longitudeRef: String?
     var longitudeData: [Double]?
     var altitudeRef: UInt8?
-    var altitude: Double?
+    var altitude: Double = 0.0
 
     for i in 0..<Int(entryCount) {
         let entryOffset = offset + 2 + UInt64(i) * 12
@@ -84,7 +84,7 @@ func parseGPSIFD(reader: Reader, exifOffset: UInt64, gpsIFDOffset: UInt64) async
     let longitude = convertToDecimalDegrees(
         degrees: lonData[0], minutes: lonData[1], seconds: lonData[2], ref: lonRef)
 
-    logger.debug("Parsed GPS location: lat=\(latitude), lon=\(longitude), alt=\(altitude ?? 0)")
+    logger.debug("Parsed GPS location: lat=\(latitude), lon=\(longitude), alt=\(altitude)")
 
     return GPSLocation(latitude: latitude, longitude: longitude, altitude: altitude)
 }

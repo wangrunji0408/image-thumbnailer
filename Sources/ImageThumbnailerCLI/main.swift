@@ -73,10 +73,8 @@ struct ImageThumbnailCLI: AsyncParsableCommand {
                 print("  duration: \(String(format: "%.2f", duration)) seconds")
             }
             if let location = metadata.location {
-                var locationStr = "  location: \(String(format: "%.6f", location.latitude)), \(String(format: "%.6f", location.longitude))"
-                if let altitude = location.altitude {
-                    locationStr += ", \(String(format: "%.2f", altitude))m"
-                }
+                let locationStr =
+                    "  location: \(String(format: "%.6f", location.latitude)), \(String(format: "%.6f", location.longitude)), \(String(format: "%.2f", location.altitude))m"
                 print(locationStr)
             }
 

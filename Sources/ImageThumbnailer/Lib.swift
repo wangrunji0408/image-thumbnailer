@@ -18,9 +18,9 @@ public struct ThumbnailInfo {
 public struct GPSLocation {
     public let latitude: Double
     public let longitude: Double
-    public let altitude: Double?
+    public let altitude: Double
 
-    public init(latitude: Double, longitude: Double, altitude: Double? = nil) {
+    public init(latitude: Double, longitude: Double, altitude: Double) {
         self.latitude = latitude
         self.longitude = longitude
         self.altitude = altitude
@@ -33,7 +33,9 @@ public struct Metadata {
     public let duration: Double?  // Duration in seconds
     public let location: GPSLocation?
 
-    public init(width: UInt32, height: UInt32, duration: Double? = nil, location: GPSLocation? = nil) {
+    public init(
+        width: UInt32, height: UInt32, duration: Double? = nil, location: GPSLocation? = nil
+    ) {
         self.width = width
         self.height = height
         self.duration = duration

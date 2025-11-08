@@ -935,9 +935,9 @@ extension Mp4Reader {
 
         let latitude = components[0]
         let longitude = components[1]
-        let altitude = components.count >= 3 ? components[2] : nil
+        let altitude = components.count >= 3 ? components[2] : 0
 
-        logger.debug("Parsed GPS: lat=\(latitude), lon=\(longitude), alt=\(altitude ?? 0)")
+        logger.debug("Parsed GPS: lat=\(latitude), lon=\(longitude), alt=\(altitude)")
 
         return GPSLocation(latitude: latitude, longitude: longitude, altitude: altitude)
     }
