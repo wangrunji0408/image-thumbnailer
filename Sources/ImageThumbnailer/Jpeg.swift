@@ -125,6 +125,43 @@ public class JpegReader: ImageReader {
         return nil
     }
 
+    private func extractThumbnailDimensions(at thumbnailOffset: UInt64, length: UInt32) async throws
+        -> (UInt32, UInt32)?
+    {
+        // Validate JPEG format
+        guard try await reader.read(at: thumbnailOffset, length: 2) == Data([0xFF, 0xD8]) else {
+            return nil
+        }
+
+        var offset = thumbnailOffset + 2  // Skip SOI marker
+        let maxOffset = thumbnailOffset + UInt64(length)
+
+        // Search for SOF marker in thumbnail
+        while offset < maxOffset && offset < thumbnailOffset + 1024 {
+            let marker = try await reader.readUInt16(at: offset, byteOrder: .bigEndian)
+            guard (marker & 0xFF00) == 0xFF00 else { break }
+
+            let markerType = UInt8(marker & 0xFF)
+            let segmentLength = try await reader.readUInt16(at: offset + 2, byteOrder: .bigEndian)
+
+            // SOF markers: 0xC0-0xCF (except 0xC4, 0xC8, 0xCC which are not SOF)
+            if (markerType >= 0xC0 && markerType <= 0xCF) && markerType != 0xC4
+                && markerType != 0xC8 && markerType != 0xCC
+            {
+                let height = UInt32(
+                    try await reader.readUInt16(at: offset + 5, byteOrder: .bigEndian))
+                let width = UInt32(
+                    try await reader.readUInt16(at: offset + 7, byteOrder: .bigEndian))
+                return (width, height)
+            }
+
+            if segmentLength < 2 { break }
+            offset += 2 + UInt64(segmentLength)
+        }
+
+        return nil
+    }
+
     private func parseTiffHeader(at offset: UInt64) async throws -> UInt32 {
         // Check byte order
         let byteOrderData = try await reader.read(at: offset, length: 2)
@@ -229,6 +266,19 @@ public class JpegReader: ImageReader {
         if isThumbnail, let relativeOffset = thumbnailOffset, let length = thumbnailLength {
             // Convert relative offset to absolute offset
             let absoluteOffset = UInt32(exifOffset) + relativeOffset
+
+            // If thumbnail dimensions are not in IFD, read them from the thumbnail JPEG data
+            if thumbnailWidth == nil || thumbnailHeight == nil {
+                // Read thumbnail dimensions from SOF marker
+                if let (w, h) = try await extractThumbnailDimensions(
+                    at: UInt64(absoluteOffset), length: length)
+                {
+                    thumbnailWidth = w
+                    thumbnailHeight = h
+                    logger.debug("Extracted thumbnail dimensions from SOF: \(w)x\(h)")
+                }
+            }
+
             let entry = ThumbnailEntry(
                 offset: absoluteOffset,
                 length: length,
@@ -479,15 +529,26 @@ public class JpegReader: ImageReader {
             // MPF offsets are relative to the start of the APP2 segment
             let absoluteOffset = UInt32(mpfOffset) + 4 + imageOffset
 
+            // Extract dimensions from MPF thumbnail JPEG data
+            var width: UInt32?
+            var height: UInt32?
+            if let (w, h) = try await extractThumbnailDimensions(
+                at: UInt64(absoluteOffset), length: imageSize)
+            {
+                width = w
+                height = h
+                logger.debug("Extracted MPF thumbnail dimensions from SOF: \(w)x\(h)")
+            }
+
             let thumbnailEntry = ThumbnailEntry(
                 offset: absoluteOffset,
                 length: imageSize,
-                width: nil,  // MPF doesn't provide dimensions in header
-                height: nil,
+                width: width,
+                height: height,
             )
             thumbnails.append(thumbnailEntry)
             logger.debug(
-                "Found MPF thumbnail: offset=\(absoluteOffset), size=\(imageSize), type=0x\(String(type, radix: 16))"
+                "Found MPF thumbnail: offset=\(absoluteOffset), size=\(imageSize), dimensions=\(width ?? 0)x\(height ?? 0), type=0x\(String(type, radix: 16))"
             )
 
             tempOffset += 16
