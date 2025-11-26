@@ -55,6 +55,7 @@ public class JpegReader: ImageReader {
         if metadata == nil {
             try await loadMetadata()
         }
+
         guard let metadata = metadata else {
             throw ImageReaderError.invalidData
         }
@@ -70,24 +71,31 @@ public class JpegReader: ImageReader {
             throw ImageReaderError.invalidData
         }
 
+        // First, extract main image dimensions from SOF marker
+        if let (width, height) = try await extractImageDimensions(at: 0, length: 65536) {
+            metadata = Metadata(width: width, height: height)
+            logger.debug("Extracted main image dimensions: \(width)x\(height)")
+        }
+
         // Find EXIF data and parse thumbnails
         var entries: [ThumbnailEntry] = []
 
-        guard let (exifOffset, exifLength) = try await extractExifData() else {
-            throw ImageReaderError.invalidData
-        }
+        // Try to extract EXIF data - it's optional for JPEG files
+        if let (exifOffset, exifLength) = try await extractExifData() {
+            var ifdOffset = try await parseTiffHeader(at: exifOffset)
+            var ifdIndex = 0
 
-        var ifdOffset = try await parseTiffHeader(at: exifOffset)
-        var ifdIndex = 0
-
-        while ifdOffset > 0 && ifdOffset < exifLength {
-            ifdOffset = try await parseIFD(
-                exifOffset: UInt64(exifOffset),
-                ifdOffset: UInt64(ifdOffset),
-                entries: &entries,
-                isThumbnail: ifdIndex > 0,
-            )
-            ifdIndex += 1
+            while ifdOffset > 0 && ifdOffset < exifLength {
+                ifdOffset = try await parseIFD(
+                    exifOffset: UInt64(exifOffset),
+                    ifdOffset: UInt64(ifdOffset),
+                    entries: &entries,
+                    isThumbnail: ifdIndex > 0,
+                )
+                ifdIndex += 1
+            }
+        } else {
+            logger.debug("No EXIF data found in JPEG file")
         }
 
         // Look for MPF thumbnails
@@ -125,19 +133,19 @@ public class JpegReader: ImageReader {
         return nil
     }
 
-    private func extractThumbnailDimensions(at thumbnailOffset: UInt64, length: UInt32) async throws
+    private func extractImageDimensions(at imageOffset: UInt64, length: UInt32) async throws
         -> (UInt32, UInt32)?
     {
         // Validate JPEG format
-        guard try await reader.read(at: thumbnailOffset, length: 2) == Data([0xFF, 0xD8]) else {
+        guard try await reader.read(at: imageOffset, length: 2) == Data([0xFF, 0xD8]) else {
             return nil
         }
 
-        var offset = thumbnailOffset + 2  // Skip SOI marker
-        let maxOffset = thumbnailOffset + UInt64(length)
+        var offset = imageOffset + 2  // Skip SOI marker
+        let maxOffset = imageOffset + UInt64(length)
 
-        // Search for SOF marker in thumbnail
-        while offset < maxOffset && offset < thumbnailOffset + 1024 {
+        // Search for SOF marker
+        while offset < maxOffset {
             let marker = try await reader.readUInt16(at: offset, byteOrder: .bigEndian)
             guard (marker & 0xFF00) == 0xFF00 else { break }
 
@@ -235,8 +243,6 @@ public class JpegReader: ImageReader {
                 }
             } else {
                 switch tag {
-                case 0x8769:  // ExifIFD
-                    metadata = try await parseExifIFD(at: exifOffset + UInt64(value))
                 case 0x8825:  // GPS IFD
                     if let gpsLocation = try await parseGPSIFD(
                         reader: reader, exifOffset: exifOffset, gpsIFDOffset: UInt64(value))
@@ -270,7 +276,7 @@ public class JpegReader: ImageReader {
             // If thumbnail dimensions are not in IFD, read them from the thumbnail JPEG data
             if thumbnailWidth == nil || thumbnailHeight == nil {
                 // Read thumbnail dimensions from SOF marker
-                if let (w, h) = try await extractThumbnailDimensions(
+                if let (w, h) = try await extractImageDimensions(
                     at: UInt64(absoluteOffset), length: length)
                 {
                     thumbnailWidth = w
@@ -295,40 +301,6 @@ public class JpegReader: ImageReader {
         let nextIFDOffset = try await reader.readUInt32(at: currentOffset)
 
         return nextIFDOffset
-    }
-
-    private func parseExifIFD(at offset: UInt64) async throws -> Metadata {
-        let entryCount = try await reader.readUInt16(at: offset)
-        logger.debug("Parsing EXIF IFD at offset \(offset), entryCount: \(entryCount)")
-
-        var width: UInt32 = 0
-        var height: UInt32 = 0
-
-        for i in 0..<Int(entryCount) {
-            let entryOffset = offset + 2 + UInt64(i) * 12
-
-            let tag = try await reader.readUInt16(at: entryOffset)
-            let type = try await reader.readUInt16(at: entryOffset + 2)
-            // let count = try await reader.readUInt32(offset: entryOffset + 4)
-            let value =
-                if type == 3 {
-                    try UInt32(await reader.readUInt16(at: entryOffset + 8))
-                } else {
-                    try await reader.readUInt32(at: entryOffset + 8)
-                }
-
-            switch tag {
-            case 0xA002:  // ExifImageWidth
-                width = value
-            case 0xA003:  // ExifImageHeight
-                height = value
-            default:
-                break
-            }
-        }
-
-        logger.debug("Parsed EXIF IFD: width=\(width), height=\(height)")
-        return Metadata(width: width, height: height)
     }
 
     private func extractMPFThumbnails() async throws -> [ThumbnailEntry] {
@@ -532,7 +504,7 @@ public class JpegReader: ImageReader {
             // Extract dimensions from MPF thumbnail JPEG data
             var width: UInt32?
             var height: UInt32?
-            if let (w, h) = try await extractThumbnailDimensions(
+            if let (w, h) = try await extractImageDimensions(
                 at: UInt64(absoluteOffset), length: imageSize)
             {
                 width = w
