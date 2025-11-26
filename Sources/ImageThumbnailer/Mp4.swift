@@ -20,14 +20,17 @@ public class Mp4Reader: ImageReader {
         }
 
         return imageInfos?.map { info in
+            // For JPEG codec, return jpeg format; for HEVC/AVC, return heic format
+            let format = info.videoTrackInfo.codecType == "jpeg" ? "jpeg" : "heic"
+            // JPEG frames may need rotation, but HEIC already contains rotation metadata
+            let rotation = info.videoTrackInfo.codecType == "jpeg" ? info.videoTrackInfo.rotation.map { Int($0) } : nil
+
             return ThumbnailInfo(
                 size: info.frameSize,
-                format: "heic",
+                format: format,
                 width: info.videoTrackInfo.width,
                 height: info.videoTrackInfo.height,
-                // MP4 thumbnails are in HEIC format which already contains rotation metadata
-                // So the thumbnail data doesn't need additional rotation correction
-                rotation: nil
+                rotation: rotation
             )
         } ?? []
     }
@@ -46,7 +49,12 @@ public class Mp4Reader: ImageReader {
         // Read frame data
         let frameData = try await reader.read(at: info.frameOffset, length: info.frameSize)
 
-        // Convert to HEIC
+        // For JPEG codec, return data directly; for HEVC/AVC, convert to HEIC
+        if info.videoTrackInfo.codecType == "jpeg" {
+            return frameData
+        }
+
+        // Convert HEVC/AVC to HEIC
         guard
             let heicData = try await convertHevcFrameToHeic(
                 frameData: frameData, trackInfo: info.videoTrackInfo)
@@ -157,18 +165,20 @@ public class Mp4Reader: ImageReader {
                         trackDimensions = (trackInfo.width, trackInfo.height)
 
                         // Create video track info for first frame extraction
-                        if trackInfo.stblOffset != 0, let hevcConfig = trackInfo.hevcConfig,
-                            let codecType = trackInfo.codecType
-                        {
-                            videoTrackInfo = VideoTrackInfo(
-                                width: trackInfo.width,
-                                height: trackInfo.height,
-                                stblOffset: trackInfo.stblOffset,
-                                stblSize: trackInfo.stblSize,
-                                hevcConfig: hevcConfig,
-                                rotation: trackInfo.rotation,
-                                codecType: codecType
-                            )
+                        // For JPEG codec, hevcConfig is not required
+                        if trackInfo.stblOffset != 0, let codecType = trackInfo.codecType {
+                            let requiresConfig = codecType != "jpeg"
+                            if !requiresConfig || trackInfo.hevcConfig != nil {
+                                videoTrackInfo = VideoTrackInfo(
+                                    width: trackInfo.width,
+                                    height: trackInfo.height,
+                                    stblOffset: trackInfo.stblOffset,
+                                    stblSize: trackInfo.stblSize,
+                                    hevcConfig: trackInfo.hevcConfig,
+                                    rotation: trackInfo.rotation,
+                                    codecType: codecType
+                                )
+                            }
                         }
                     }
                 }
@@ -540,6 +550,11 @@ public class Mp4Reader: ImageReader {
         let codecType = try await reader.readString(at: entryOffset + 4, length: 4)
         logger.debug("Found codec type: '\(codecType)', entry size: \(entrySize)")
 
+        // For JPEG codec, no config box is needed
+        if codecType == "jpeg" {
+            return (nil, codecType)
+        }
+
         // Support both HEVC (hvc1/hev1) and AVC (avc1/avc3)
         let configBoxType: String
         if codecType == "hvc1" || codecType == "hev1" {
@@ -800,7 +815,8 @@ private struct VideoTrackInfo {
 private func validateMp4Format(reader: Reader) async throws -> Bool {
     let size = try await reader.readUInt32(at: 0)
     let type = try await reader.readString(at: 4, length: 4)
-    return size >= 8 && type == "ftyp"
+    // Support both modern MP4/MOV (ftyp) and legacy QuickTime (pnot, mdat, wide, etc.)
+    return size >= 8 && (type == "ftyp" || type == "pnot" || type == "mdat" || type == "wide" || type == "skip" || type == "free")
 }
 
 private func findMoovBox(reader: Reader) async throws -> (UInt64, UInt32)? {

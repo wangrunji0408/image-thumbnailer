@@ -63,7 +63,7 @@ struct ImageThumbnailCLI: AsyncParsableCommand {
                 reader = Mp4Reader(readAt: readAt)
             default:
                 logger.error(
-                    "unsupported file format: \(fileExtension). Only HEIF, JPEG, ARW, and MP4 are supported."
+                    "unsupported file format: \(fileExtension). Only HEIF, JPEG, ARW, MP4, and MOV are supported."
                 )
                 return
             }
