@@ -73,14 +73,14 @@ public class JpegReader: ImageReader {
         // Find EXIF data and parse thumbnails
         var entries: [ThumbnailEntry] = []
 
-        guard let (exifOffset, _) = try await extractExifData() else {
+        guard let (exifOffset, exifLength) = try await extractExifData() else {
             throw ImageReaderError.invalidData
         }
 
         var ifdOffset = try await parseTiffHeader(at: exifOffset)
         var ifdIndex = 0
 
-        while ifdOffset > 0 {
+        while ifdOffset > 0 && ifdOffset < exifLength {
             ifdOffset = try await parseIFD(
                 exifOffset: UInt64(exifOffset),
                 ifdOffset: UInt64(ifdOffset),
