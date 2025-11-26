@@ -21,13 +21,13 @@ public class Mp4Reader: ImageReader {
 
         return imageInfos?.map { info in
             return ThumbnailInfo(
-                size: info.frameSize ?? 0,
+                size: info.frameSize,
                 format: "heic",
-                width: info.width,
-                height: info.height,
+                width: info.videoTrackInfo.width,
+                height: info.videoTrackInfo.height,
                 // MP4 thumbnails are in HEIC format which already contains rotation metadata
                 // So the thumbnail data doesn't need additional rotation correction
-                rotation: nil,
+                rotation: nil
             )
         } ?? []
     }
@@ -43,21 +43,13 @@ public class Mp4Reader: ImageReader {
 
         let info = infos[index]
 
-        // Extract and convert first frame to HEIC
-        guard let frameOffset = info.frameOffset,
-            let frameSize = info.frameSize,
-            let videoTrackInfo = info.videoTrackInfo
-        else {
-            throw ImageReaderError.invalidData
-        }
-
         // Read frame data
-        let frameData = try await reader.read(at: frameOffset, length: frameSize)
+        let frameData = try await reader.read(at: info.frameOffset, length: info.frameSize)
 
         // Convert to HEIC
         guard
             let heicData = try await convertHevcFrameToHeic(
-                frameData: frameData, trackInfo: videoTrackInfo)
+                frameData: frameData, trackInfo: info.videoTrackInfo)
         else {
             throw ImageReaderError.invalidData
         }
@@ -397,9 +389,6 @@ public class Mp4Reader: ImageReader {
         logger.debug("Prepared first frame info: offset=\(firstFrameOffset), size=\(frameSize)")
 
         return Mp4ImageInfo(
-            width: videoTrackInfo.width,
-            height: videoTrackInfo.height,
-            rotation: videoTrackInfo.rotation,
             frameOffset: firstFrameOffset,
             frameSize: frameSize,
             videoTrackInfo: videoTrackInfo
@@ -791,13 +780,9 @@ public class Mp4Reader: ImageReader {
 // MARK: - MP4 Data Structures
 
 private struct Mp4ImageInfo {
-    let width: UInt32?
-    let height: UInt32?
-    let rotation: Double?
-    // For first frame extraction only
-    let frameOffset: UInt64?
-    let frameSize: UInt32?
-    let videoTrackInfo: VideoTrackInfo?
+    let frameOffset: UInt64
+    let frameSize: UInt32
+    let videoTrackInfo: VideoTrackInfo
 }
 
 private struct VideoTrackInfo {
