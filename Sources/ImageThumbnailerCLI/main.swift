@@ -132,7 +132,7 @@ struct ImageThumbnailCLI: AsyncParsableCommand {
             try thumbnailData.write(to: outputURL)
             print("thumbnail saved to: \(outputURL.path)")
         } catch {
-            logger.error("\(error.localizedDescription)")
+            print("Error: \(error.localizedDescription)")
         }
     }
 }

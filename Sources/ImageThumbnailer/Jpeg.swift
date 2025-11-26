@@ -72,7 +72,7 @@ public class JpegReader: ImageReader {
         }
 
         // First, extract main image dimensions from SOF marker
-        if let (width, height) = try await extractImageDimensions(at: 0, length: 65536) {
+        if let (width, height) = try await extractImageDimensions(at: 0, length: 0x100000) {
             metadata = Metadata(width: width, height: height)
             logger.debug("Extracted main image dimensions: \(width)x\(height)")
         }
@@ -307,7 +307,7 @@ public class JpegReader: ImageReader {
         var offset: UInt64 = 2  // Skip JPEG SOI marker
 
         // Search for APP2 segments that contain MPF data
-        while offset < 1_048_576 {  // 1MB search range
+        while offset < 0x100000 {  // 1MB search range
             try await reader.prefetch(at: offset, length: 256)
             guard try await reader.readUInt8(at: offset) == 0xFF else {
                 break
