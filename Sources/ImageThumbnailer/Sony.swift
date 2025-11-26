@@ -169,6 +169,17 @@ public class SonyArwReader: ImageReader {
 
         // Add thumbnail entry if we found valid thumbnail data
         if let thumbnailOffset = thumbnailOffset, let thumbnailLength = thumbnailLength {
+            // If dimensions not found in IFD, extract from JPEG data
+            if thumbnailWidth == nil || thumbnailHeight == nil {
+                if let (w, h) = try await extractImageDimensions(
+                    at: UInt64(thumbnailOffset), length: thumbnailLength)
+                {
+                    thumbnailWidth = w
+                    thumbnailHeight = h
+                    logger.debug("Extracted thumbnail dimensions from SOF: \(w)x\(h)")
+                }
+            }
+
             let entry = ThumbnailEntry(
                 offset: thumbnailOffset,
                 length: thumbnailLength,
@@ -256,6 +267,43 @@ public class SonyArwReader: ImageReader {
         case 8: return 270  // Left-bottom (rotate 270 CW or 90 CCW)
         default: return 0   // Default to no rotation for unknown orientations
         }
+    }
+
+    private func extractImageDimensions(at imageOffset: UInt64, length: UInt32) async throws
+        -> (UInt32, UInt32)?
+    {
+        // Validate JPEG format
+        guard try await reader.read(at: imageOffset, length: 2) == Data([0xFF, 0xD8]) else {
+            return nil
+        }
+
+        var offset = imageOffset + 2  // Skip SOI marker
+        let maxOffset = imageOffset + UInt64(length)
+
+        // Search for SOF marker
+        while offset < maxOffset {
+            let marker = try await reader.readUInt16(at: offset, byteOrder: .bigEndian)
+            guard (marker & 0xFF00) == 0xFF00 else { break }
+
+            let markerType = UInt8(marker & 0xFF)
+            let segmentLength = try await reader.readUInt16(at: offset + 2, byteOrder: .bigEndian)
+
+            // SOF markers: 0xC0-0xCF (except 0xC4, 0xC8, 0xCC which are not SOF)
+            if (markerType >= 0xC0 && markerType <= 0xCF) && markerType != 0xC4
+                && markerType != 0xC8 && markerType != 0xCC
+            {
+                let height = UInt32(
+                    try await reader.readUInt16(at: offset + 5, byteOrder: .bigEndian))
+                let width = UInt32(
+                    try await reader.readUInt16(at: offset + 7, byteOrder: .bigEndian))
+                return (width, height)
+            }
+
+            if segmentLength < 2 { break }
+            offset += 2 + UInt64(segmentLength)
+        }
+
+        return nil
     }
 }
 
