@@ -22,12 +22,14 @@ public class HeifReader: ImageReader {
         }
 
         return thumbnailInfos?.map { info in
-            ThumbnailInfo(
+            let format = info.type == "hvc1" ? "heic" : "jpeg"
+            return ThumbnailInfo(
                 size: info.size,
-                format: info.type == "hvc1" ? "heic" : "jpeg",
+                format: format,
                 width: info.width,
                 height: info.height,
-                rotation: info.rotation
+                // JPEG thumbnails need rotation correction, but HEIC thumbnails already contain rotation metadata
+                rotation: format == "jpeg" ? info.rotation : nil
             )
         } ?? []
     }

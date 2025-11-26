@@ -25,7 +25,9 @@ public class Mp4Reader: ImageReader {
                 format: "heic",
                 width: info.width,
                 height: info.height,
-                rotation: info.rotation.map { Int($0) }
+                // MP4 thumbnails are in HEIC format which already contains rotation metadata
+                // So the thumbnail data doesn't need additional rotation correction
+                rotation: nil,
             )
         } ?? []
     }

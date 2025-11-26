@@ -12,6 +12,7 @@ public struct ThumbnailInfo {
     public let format: String
     public let width: UInt32?
     public let height: UInt32?
+    // Rotation in degrees (0, 90, 180, 270) that should be applied to display the image correctly
     public let rotation: Int?
 }
 
