@@ -101,7 +101,7 @@ final class ImageReaderTests: XCTestCase {
         print("JPEG Reader - Read count: \(readCount), Total bytes: \(totalBytes)")
     }
 
-    func testSonyArwReader() async throws {
+    func testArwReader() async throws {
         let bundle = Bundle.module
         guard let url = bundle.url(forResource: "DSC04618", withExtension: "ARW") else {
             XCTFail("Test file not found")
@@ -122,7 +122,7 @@ final class ImageReaderTests: XCTestCase {
             return fileHandle.readData(ofLength: Int(length))
         }
 
-        let reader = SonyArwReader(readAt: readAt)
+        let reader = ArwReader(readAt: readAt)
 
         // Test getMetadata
         let metadata = try await reader.getMetadata()

@@ -3,18 +3,37 @@ import Foundation
 import ImageIO
 import OSLog
 
-private let logger = Logger(subsystem: "com.wangrunji.ImageThumbnailer", category: "SonyArwReader")
+private let logger = Logger(subsystem: "com.wangrunji.ImageThumbnailer", category: "TiffReader")
 
-// MARK: - SonyArwReader Implementation
+// MARK: - TiffReader Implementation
 
-public class SonyArwReader: ImageReader {
+/// Generic TIFF-based image reader for formats like DNG and ARW
+public class TiffReader: ImageReader {
     private let reader: Reader
     private var thumbnailEntries: [ThumbnailEntry]?
     private var metadata: Metadata?
     private var orientation: UInt16?
 
-    public required init(readAt: @escaping (UInt64, UInt32) async throws -> Data) {
+    /// Strategy for determining main image dimensions in IFD0
+    /// - useIfd0: Use ImageWidth/ImageHeight from IFD0 directly (ARW)
+    /// - useSubIfd: Use dimensions from SubIFD tag (DNG)
+    private let mainImageStrategy: MainImageStrategy
+
+    public enum MainImageStrategy {
+        case useIfd0  // ARW: Main image dimensions are in IFD0
+        case useSubIfd  // DNG: Main image dimensions are in SubIFD
+    }
+
+    public init(
+        readAt: @escaping (UInt64, UInt32) async throws -> Data,
+        mainImageStrategy: MainImageStrategy = .useIfd0
+    ) {
         reader = Reader(readAt: readAt)
+        self.mainImageStrategy = mainImageStrategy
+    }
+
+    public required convenience init(readAt: @escaping (UInt64, UInt32) async throws -> Data) {
+        self.init(readAt: readAt, mainImageStrategy: .useIfd0)
     }
 
     public func getThumbnailList() async throws -> [ThumbnailInfo] {
@@ -57,7 +76,7 @@ public class SonyArwReader: ImageReader {
     }
 
     private func loadMetadata() async throws {
-        // Read TIFF header and validate ARW format
+        // Read TIFF header and validate format
         try await reader.prefetch(at: 0, length: 4096)
         let ifdOffset = try await parseTiffHeader()
 
@@ -104,6 +123,7 @@ public class SonyArwReader: ImageReader {
         var thumbnailLength: UInt32?
         var thumbnailWidth: UInt32?
         var thumbnailHeight: UInt32?
+        var subfileType: UInt32?
 
         for i in 0..<entryCount {
             let entryOffset = UInt64(ifdOffset) + 2 + UInt64(i) * 12
@@ -119,18 +139,43 @@ public class SonyArwReader: ImageReader {
                 }
 
             switch tag {
+            case 0x00FE:  // SubfileType
+                subfileType = value
+            // For DNG: 0 = Full-resolution, 1 = Reduced-resolution (preview)
+            // For ARW: Check if this is the main image IFD
+
             case 0x0100:  // ImageWidth
-                if ifdIndex == 0 {  // Main image is in IFD0
-                    mainWidth = value
-                } else {
-                    thumbnailWidth = value
+                switch mainImageStrategy {
+                case .useIfd0:
+                    // ARW: Main image dimensions are in IFD0
+                    if ifdIndex == 0 {
+                        mainWidth = value
+                    } else {
+                        thumbnailWidth = value
+                    }
+                case .useSubIfd:
+                    // DNG: Only use if this is full-resolution image (subfileType == 0) in IFD0
+                    if ifdIndex == 0 && subfileType == 0 {
+                        mainWidth = value
+                    } else {
+                        thumbnailWidth = value
+                    }
                 }
 
             case 0x0101:  // ImageHeight
-                if ifdIndex == 0 {  // Main image is in IFD0
-                    mainHeight = value
-                } else {
-                    thumbnailHeight = value
+                switch mainImageStrategy {
+                case .useIfd0:
+                    if ifdIndex == 0 {
+                        mainHeight = value
+                    } else {
+                        thumbnailHeight = value
+                    }
+                case .useSubIfd:
+                    if ifdIndex == 0 && subfileType == 0 {
+                        mainHeight = value
+                    } else {
+                        thumbnailHeight = value
+                    }
                 }
 
             case 0x0111:  // StripOffsets or ThumbnailOffset
@@ -139,10 +184,10 @@ public class SonyArwReader: ImageReader {
             case 0x0117:  // StripByteCounts or ThumbnailLength
                 thumbnailLength = value
 
-            case 0x0201:  // JPEGInterchangeFormat (thumbnail offset)
+            case 0x0201:  // JPEGInterchangeFormat (thumbnail/preview offset)
                 thumbnailOffset = value
 
-            case 0x0202:  // JPEGInterchangeFormatLength (thumbnail length)
+            case 0x0202:  // JPEGInterchangeFormatLength (thumbnail/preview length)
                 thumbnailLength = value
 
             case 0x0112:  // Orientation
@@ -154,12 +199,23 @@ public class SonyArwReader: ImageReader {
                 let subIfdOffset = value
                 let subIfdDimensions = try await parseSubIFDForDimensions(
                     subIfdOffset: UInt64(subIfdOffset))
-                if ifdIndex == 0 {
-                    mainWidth = subIfdDimensions.width
-                    mainHeight = subIfdDimensions.height
-                } else {
-                    thumbnailWidth = subIfdDimensions.width
-                    thumbnailHeight = subIfdDimensions.height
+
+                switch mainImageStrategy {
+                case .useIfd0:
+                    // ARW: Use SubIFD dimensions for main image if in IFD0
+                    if ifdIndex == 0 {
+                        mainWidth = subIfdDimensions.width
+                        mainHeight = subIfdDimensions.height
+                    } else {
+                        thumbnailWidth = subIfdDimensions.width
+                        thumbnailHeight = subIfdDimensions.height
+                    }
+                case .useSubIfd:
+                    // DNG: Always use SubIFD dimensions for main image if in IFD0
+                    if ifdIndex == 0 {
+                        mainWidth = subIfdDimensions.width
+                        mainHeight = subIfdDimensions.height
+                    }
                 }
 
             default:
@@ -259,13 +315,13 @@ public class SonyArwReader: ImageReader {
 
     private func orientationToRotation(_ orientation: UInt16?) -> Int? {
         guard let orientation = orientation else { return nil }
-        
+
         switch orientation {
-        case 1: return 0    // Top-left (normal)
+        case 1: return 0  // Top-left (normal)
         case 3: return 180  // Bottom-right (rotate 180)
-        case 6: return 90   // Right-top (rotate 90 CW)
+        case 6: return 90  // Right-top (rotate 90 CW)
         case 8: return 270  // Left-bottom (rotate 270 CW or 90 CCW)
-        default: return 0   // Default to no rotation for unknown orientations
+        default: return 0  // Default to no rotation for unknown orientations
         }
     }
 

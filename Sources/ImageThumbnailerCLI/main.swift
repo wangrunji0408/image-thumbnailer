@@ -58,7 +58,7 @@ struct ImageThumbnailCLI: AsyncParsableCommand {
             case "jpg", "jpeg":
                 reader = JpegReader(readAt: readAt)
             case "arw":
-                reader = SonyArwReader(readAt: readAt)
+                reader = ArwReader(readAt: readAt)
             case "dng":
                 reader = DngReader(readAt: readAt)
             case "mp4", "mov":
