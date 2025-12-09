@@ -15,7 +15,7 @@ struct ImageThumbnailCLI: AsyncParsableCommand {
             "A tool to generate thumbnails from various image formats including HEIF, JPEG, and Sony ARW files."
     )
 
-    @Argument(help: "The path to the image file (HEIF, JPEG, or Sony ARW)")
+    @Argument(help: "The path to the image file (HEIF, JPEG, ARW, DNG, MP4, or MOV)")
     var imagePath: String
 
     @Option(name: .shortAndLong, help: "The length of the thumbnail's short side")
@@ -59,11 +59,13 @@ struct ImageThumbnailCLI: AsyncParsableCommand {
                 reader = JpegReader(readAt: readAt)
             case "arw":
                 reader = SonyArwReader(readAt: readAt)
+            case "dng":
+                reader = DngReader(readAt: readAt)
             case "mp4", "mov":
                 reader = Mp4Reader(readAt: readAt)
             default:
                 logger.error(
-                    "unsupported file format: \(fileExtension). Only HEIF, JPEG, ARW, MP4, and MOV are supported."
+                    "unsupported file format: \(fileExtension). Only HEIF, JPEG, ARW, DNG, MP4, and MOV are supported."
                 )
                 return
             }
