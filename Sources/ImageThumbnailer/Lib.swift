@@ -16,7 +16,7 @@ public struct ThumbnailInfo {
     public let rotation: Int?
 }
 
-public struct GPSLocation {
+public struct GPSLocation: Sendable {
     public let latitude: Float
     public let longitude: Float
     public let altitude: Float
@@ -28,7 +28,7 @@ public struct GPSLocation {
     }
 }
 
-public struct Metadata {
+public struct Metadata: Sendable {
     public let width: UInt32
     public let height: UInt32
     public let duration: Float?  // Duration in seconds
