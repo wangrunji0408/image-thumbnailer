@@ -44,7 +44,7 @@ public class TiffReader: ImageReader {
         return thumbnailEntries?.map { entry in
             ThumbnailInfo(
                 size: entry.length,
-                format: "jpeg",
+                format: entry.format,
                 width: entry.width,
                 height: entry.height,
                 rotation: orientationToRotation(orientation)
@@ -62,7 +62,52 @@ public class TiffReader: ImageReader {
         }
 
         let entry = entries[index]
-        return try await reader.read(at: UInt64(entry.offset), length: entry.length)
+        let rawData = try await reader.read(at: UInt64(entry.offset), length: entry.length)
+
+        if entry.format == "tiff", let w = entry.width, let h = entry.height {
+            return wrapRGBInTiff(rawData, width: w, height: h)
+        }
+        return rawData
+    }
+
+    /// Wrap raw uncompressed RGB bytes into a minimal TIFF container.
+    private func wrapRGBInTiff(_ rgb: Data, width: UInt32, height: UInt32) -> Data {
+        var d = Data()
+        // Helper to append little-endian values
+        func put16(_ v: UInt16) { withUnsafeBytes(of: v.littleEndian) { d.append(contentsOf: $0) } }
+        func put32(_ v: UInt32) { withUnsafeBytes(of: v.littleEndian) { d.append(contentsOf: $0) } }
+        func tag(_ t: UInt16, type: UInt16, count: UInt32, value: UInt32) {
+            put16(t); put16(type); put32(count); put32(value)
+        }
+
+        // TIFF header: "II" + magic 42 + IFD offset (8)
+        d.append(contentsOf: [0x49, 0x49])
+        put16(42)
+        put32(8)
+
+        // IFD: 9 entries
+        let ifdEntries: UInt16 = 9
+        let bpsOffset: UInt32 = 8 + 2 + UInt32(ifdEntries) * 12 + 4  // after IFD
+        let stripOffset: UInt32 = bpsOffset + 6  // after BitsPerSample data
+
+        put16(ifdEntries)
+        tag(0x0100, type: 3, count: 1, value: UInt32(width))    // ImageWidth
+        tag(0x0101, type: 3, count: 1, value: UInt32(height))   // ImageHeight
+        tag(0x0102, type: 3, count: 3, value: bpsOffset)        // BitsPerSample -> offset
+        tag(0x0103, type: 3, count: 1, value: 1)                // Compression = none
+        tag(0x0106, type: 3, count: 1, value: 2)                // PhotometricInterpretation = RGB
+        tag(0x0111, type: 4, count: 1, value: stripOffset)      // StripOffsets
+        tag(0x0115, type: 3, count: 1, value: 3)                // SamplesPerPixel
+        tag(0x0116, type: 3, count: 1, value: UInt32(height))   // RowsPerStrip
+        tag(0x0117, type: 4, count: 1, value: UInt32(rgb.count)) // StripByteCounts
+        put32(0) // next IFD = 0
+
+        // BitsPerSample: 8, 8, 8
+        put16(8); put16(8); put16(8)
+
+        // Strip data
+        d.append(rgb)
+        return d
     }
 
     public func getMetadata() async throws -> Metadata {
@@ -124,6 +169,7 @@ public class TiffReader: ImageReader {
         var thumbnailWidth: UInt32?
         var thumbnailHeight: UInt32?
         var subfileType: UInt32?
+        var compression: UInt32?
 
         for i in 0..<entryCount {
             let entryOffset = UInt64(ifdOffset) + 2 + UInt64(i) * 12
@@ -143,6 +189,9 @@ public class TiffReader: ImageReader {
                 subfileType = value
             // For DNG: 0 = Full-resolution, 1 = Reduced-resolution (preview)
             // For ARW: Check if this is the main image IFD
+
+            case 0x0103:  // Compression
+                compression = value
 
             case 0x0100:  // ImageWidth
                 switch mainImageStrategy {
@@ -269,7 +318,7 @@ public class TiffReader: ImageReader {
             }
         }
 
-        // Add thumbnail entry if we found valid JPEG data in this IFD
+        // Add thumbnail entry if we found valid data in this IFD
         if let thumbnailOffset = thumbnailOffset, let thumbnailLength = thumbnailLength {
             // Verify it's actually a standard (lossy) JPEG, not lossless JPEG (e.g., CR2 raw data)
             let isJpeg = try await isStandardJpeg(at: UInt64(thumbnailOffset), length: thumbnailLength)
@@ -293,6 +342,19 @@ public class TiffReader: ImageReader {
                 entries.append(entry)
                 logger.debug(
                     "Found JPEG thumbnail: offset=\(thumbnailOffset), length=\(thumbnailLength), width=\(thumbnailWidth ?? 0), height=\(thumbnailHeight ?? 0)"
+                )
+            } else if compression == 1, let w = thumbnailWidth, let h = thumbnailHeight {
+                // Uncompressed RGB strip data (e.g., some DNG files)
+                let entry = ThumbnailEntry(
+                    offset: thumbnailOffset,
+                    length: thumbnailLength,
+                    width: w,
+                    height: h,
+                    format: "tiff"
+                )
+                entries.append(entry)
+                logger.debug(
+                    "Found uncompressed TIFF thumbnail: offset=\(thumbnailOffset), length=\(thumbnailLength), width=\(w), height=\(h)"
                 )
             }
         }
@@ -537,4 +599,13 @@ private struct ThumbnailEntry {
     let length: UInt32
     let width: UInt32?
     let height: UInt32?
+    let format: String  // "jpeg" or "tiff"
+
+    init(offset: UInt32, length: UInt32, width: UInt32?, height: UInt32?, format: String = "jpeg") {
+        self.offset = offset
+        self.length = length
+        self.width = width
+        self.height = height
+        self.format = format
+    }
 }
