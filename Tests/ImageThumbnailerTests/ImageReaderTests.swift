@@ -40,7 +40,11 @@ final class ImageReaderTests: XCTestCase {
 
     static let testCases: [TestCase] = [
         TestCase(
-            "HEIF", resource: "iPhone", ext: "HEIC", reader: HeifReader.self,
+            "HEIF (iPhone)", resource: "iPhone", ext: "HEIC", reader: HeifReader.self,
+            maxReadCount: 5, maxBytes: 100 * 1024),
+        TestCase(
+            "HEIF (Canon HIF)", resource: "Canon", ext: "hif", reader: HeifReader.self,
+            width: 5472, height: 3648, minThumbnails: 2,
             maxReadCount: 5, maxBytes: 100 * 1024),
         TestCase(
             "JPEG", resource: "iPhone5", ext: "JPG", reader: JpegReader.self,

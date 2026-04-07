@@ -195,6 +195,23 @@ public class TiffReader: ImageReader {
                     orientation = UInt16(value)
                 }
 
+            case 0x0002:  // Panasonic SensorWidth (RW2)
+                if ifdIndex == 0 && mainWidth == 0 {
+                    mainWidth = value
+                }
+
+            case 0x0003:  // Panasonic SensorHeight (RW2)
+                if ifdIndex == 0 && mainHeight == 0 {
+                    mainHeight = value
+                }
+
+            case 0x002E:  // Panasonic JpgFromRaw (RW2) - embedded JPEG
+                // type 7 (undefined), count is the length, value is the offset
+                if type == 7 && count > 4 {
+                    thumbnailOffset = value
+                    thumbnailLength = count
+                }
+
             case 0x014A:  // SubIFD
                 // Read all SubIFD offsets. When count > 1, value is a pointer to an array of offsets.
                 var subIfdOffsets: [UInt32] = []
@@ -355,9 +372,11 @@ public class TiffReader: ImageReader {
             throw ImageReaderError.invalidData
         }
 
-        // Check magic number (42)
+        // Check magic number: 42 (standard TIFF), 0x4F52 (Olympus ORF), 0x0055 (Panasonic RW2)
         let magic = try await reader.readUInt16(at: 2)
-        guard magic == 42 else { throw ImageReaderError.invalidData }
+        guard magic == 42 || magic == 0x4F52 || magic == 0x0055 else {
+            throw ImageReaderError.invalidData
+        }
 
         // Get IFD offset
         let ifdOffset = try await reader.readUInt32(at: 4)
@@ -438,6 +457,30 @@ public class DngReader: TiffReader {
 public class NefReader: TiffReader {
     public required init(readAt: @escaping (UInt64, UInt32) async throws -> Data) {
         super.init(readAt: readAt, mainImageStrategy: .useSubIfd)
+    }
+}
+
+/// Pentax PEF (RAW) image reader
+/// PEF files are standard TIFF-based
+public class PefReader: TiffReader {
+    public required init(readAt: @escaping (UInt64, UInt32) async throws -> Data) {
+        super.init(readAt: readAt, mainImageStrategy: .useIfd0)
+    }
+}
+
+/// Olympus ORF (RAW) image reader
+/// ORF files use TIFF-like structure with magic 0x4F52
+public class OrfReader: TiffReader {
+    public required init(readAt: @escaping (UInt64, UInt32) async throws -> Data) {
+        super.init(readAt: readAt, mainImageStrategy: .useIfd0)
+    }
+}
+
+/// Panasonic RW2 (RAW) image reader
+/// RW2 files use TIFF-like structure with magic 0x0055
+public class Rw2Reader: TiffReader {
+    public required init(readAt: @escaping (UInt64, UInt32) async throws -> Data) {
+        super.init(readAt: readAt, mainImageStrategy: .useIfd0)
     }
 }
 
