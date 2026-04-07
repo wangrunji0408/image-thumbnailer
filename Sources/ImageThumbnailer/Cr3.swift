@@ -27,7 +27,7 @@ public class Cr3Reader: ImageReader {
         return thumbnailEntries?.map { entry in
             ThumbnailInfo(
                 size: UInt32(entry.size),
-                format: "jpeg",
+                format: entry.format,
                 width: entry.width,
                 height: entry.height,
                 rotation: entry.rotation
@@ -41,7 +41,14 @@ public class Cr3Reader: ImageReader {
             throw ImageReaderError.indexOutOfBounds
         }
         let entry = entries[index]
-        return try await reader.read(at: entry.offset, length: UInt32(entry.size))
+        let rawData = try await reader.read(at: entry.offset, length: UInt32(entry.size))
+
+        // For HEVC thumbnails, wrap in HEIC container
+        if let hevcEntry = entry.hevcEntry {
+            let heicData = try await createHEICFromHEVC(hevcEntry, hevcData: rawData)
+            if let heicData { return heicData }
+        }
+        return rawData
     }
 
     public func getMetadata() async throws -> Metadata {
@@ -148,23 +155,110 @@ public class Cr3Reader: ImageReader {
                 result.orientation = dims.orientation
 
             case "THMB":
-                // Embedded JPEG thumbnail
-                // Header: version(4) + width(2) + height(2) + jpegSize(4) + padding(4) = 16 bytes
                 let dataStart = offset + 8
-                let thmbWidth = try await reader.readUInt16(at: dataStart + 4, byteOrder: .bigEndian)
-                let thmbHeight = try await reader.readUInt16(
-                    at: dataStart + 6, byteOrder: .bigEndian)
-                let jpegSize = try await reader.readUInt32(
-                    at: dataStart + 8, byteOrder: .bigEndian)
-                let jpegOffset = dataStart + 16
+                let version = try await reader.readUInt8(at: dataStart)
 
-                result.thumbnail = Cr3ThumbnailEntry(
-                    offset: jpegOffset,
-                    size: jpegSize,
-                    width: UInt32(thmbWidth),
-                    height: UInt32(thmbHeight),
-                    rotation: orientationToRotation(result.orientation)
-                )
+                if version == 0 {
+                    // THMB v0: JPEG thumbnail
+                    // Header: version(4) + width(2) + height(2) + jpegSize(4) + padding(4) = 16 bytes
+                    let thmbWidth = try await reader.readUInt16(
+                        at: dataStart + 4, byteOrder: .bigEndian)
+                    let thmbHeight = try await reader.readUInt16(
+                        at: dataStart + 6, byteOrder: .bigEndian)
+                    let jpegSize = try await reader.readUInt32(
+                        at: dataStart + 8, byteOrder: .bigEndian)
+                    let jpegOffset = dataStart + 16
+
+                    result.thumbnail = Cr3ThumbnailEntry(
+                        offset: jpegOffset,
+                        size: jpegSize,
+                        width: UInt32(thmbWidth),
+                        height: UInt32(thmbHeight),
+                        rotation: orientationToRotation(result.orientation),
+                        format: "jpeg",
+                        hevcEntry: nil
+                    )
+                } else {
+                    // THMB v1: HEVC thumbnail
+                    // Header: version(1) + pad(3) + unk(2) + width(2) + unk(4) + dataSize(4) = 16 bytes
+                    // Followed by sub-boxes: CISZ, hvcC, colr, pixi, IMGD
+                    let thmbEnd = offset + UInt64(boxSize)
+                    var thmbWidth: UInt32 = 0
+                    var thmbHeight: UInt32 = 0
+                    var hvcCData: Data?
+                    var imgdOffset: UInt64 = 0
+                    var imgdSize: UInt32 = 0
+
+                    var subOff = dataStart + 16
+                    while subOff + 8 <= thmbEnd {
+                        let subSize = try await reader.readUInt32(
+                            at: subOff, byteOrder: .bigEndian)
+                        let subType = try await reader.readString(
+                            at: subOff + 4, length: 4)
+                        guard subSize >= 8 else { break }
+
+                        switch subType {
+                        case "CISZ":
+                            if subSize >= 20 {
+                                thmbWidth = try await reader.readUInt32(
+                                    at: subOff + 12, byteOrder: .bigEndian)
+                                thmbHeight = try await reader.readUInt32(
+                                    at: subOff + 16, byteOrder: .bigEndian)
+                            }
+                        case "hvcC":
+                            hvcCData = try await reader.read(
+                                at: subOff + 8, length: subSize - 8)
+                        case "IMGD":
+                            imgdOffset = subOff + 8
+                            imgdSize = subSize - 8
+                        default:
+                            break
+                        }
+                        subOff += UInt64(subSize)
+                    }
+
+                    if imgdSize > 0, let hvcCData {
+                        // Build properties for HeifWriter
+                        var properties: [ItemProperty] = []
+
+                        // ispe (image spatial extents)
+                        var ispeData = Data()
+                        ispeData.append(contentsOf: [0, 0, 0, 0])  // version/flags
+                        withUnsafeBytes(of: thmbWidth.bigEndian) { ispeData.append(contentsOf: $0) }
+                        withUnsafeBytes(of: thmbHeight.bigEndian) {
+                            ispeData.append(contentsOf: $0)
+                        }
+                        properties.append(ItemProperty(
+                            propertyIndex: 1, propertyType: "ispe",
+                            rotation: nil, width: thmbWidth, height: thmbHeight,
+                            rawData: ispeData))
+
+                        // hvcC
+                        properties.append(ItemProperty(
+                            propertyIndex: 2, propertyType: "hvcC",
+                            rotation: nil, width: nil, height: nil,
+                            rawData: hvcCData))
+
+                        let hevcEntry = HeifThumbnailEntry(
+                            itemId: 1,
+                            offset: 0, size: imgdSize,
+                            rotation: orientationToRotation(result.orientation),
+                            width: thmbWidth, height: thmbHeight,
+                            type: "hvc1",
+                            properties: properties
+                        )
+
+                        result.thumbnail = Cr3ThumbnailEntry(
+                            offset: imgdOffset,
+                            size: imgdSize,
+                            width: thmbWidth,
+                            height: thmbHeight,
+                            rotation: orientationToRotation(result.orientation),
+                            format: "heic",
+                            hevcEntry: hevcEntry
+                        )
+                    }
+                }
 
             default:
                 break
@@ -306,7 +400,9 @@ public class Cr3Reader: ImageReader {
             size: dataSize,
             width: trackWidth,
             height: trackHeight,
-            rotation: nil
+            rotation: nil,
+            format: "jpeg",
+            hevcEntry: nil
         )
     }
 
@@ -362,4 +458,6 @@ private struct Cr3ThumbnailEntry {
     let width: UInt32
     let height: UInt32
     let rotation: Int?
+    let format: String  // "jpeg" or "heic"
+    let hevcEntry: HeifThumbnailEntry?  // non-nil for HEVC thumbnails
 }

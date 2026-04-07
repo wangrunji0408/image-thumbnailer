@@ -1,3 +1,4 @@
+import AppKit
 import XCTest
 
 @testable import ImageThumbnailer
@@ -106,6 +107,14 @@ final class ImageReaderTests: XCTestCase {
             let data = try await reader.getThumbnail(at: 0)
             XCTAssertFalse(data.isEmpty, "\(tc.name): thumbnail data should not be empty")
 
+            // Verify thumbnail is a valid image
+            let image = NSImage(data: data)
+            XCTAssertNotNil(image, "\(tc.name): thumbnail is not a valid image")
+            if let image {
+                XCTAssertGreaterThan(
+                    image.size.width, 0, "\(tc.name): image width should be > 0")
+            }
+
             XCTAssertLessThanOrEqual(
                 readCount, tc.maxReadCount,
                 "\(tc.name): too many reads (\(readCount))")
@@ -136,6 +145,7 @@ final class ImageReaderTests: XCTestCase {
         XCTAssertFalse(thumbnails.isEmpty)
         let data = try await reader.getThumbnail(at: 0)
         XCTAssertFalse(data.isEmpty)
+        XCTAssertNotNil(NSImage(data: data), "MP4 thumbnail should be a valid image")
     }
 
     func testMp4ReaderH264() async throws {
@@ -157,6 +167,7 @@ final class ImageReaderTests: XCTestCase {
 
         let data = try await reader.getThumbnail(at: 0)
         XCTAssertGreaterThan(data.count, 100 * 1024)
+        XCTAssertNotNil(NSImage(data: data), "H.264 MP4 thumbnail should be a valid image")
     }
 
     func testCr3Reader() async throws {
@@ -177,12 +188,11 @@ final class ImageReaderTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(thumbnails.count, 2)
 
         for (i, thumb) in thumbnails.enumerated() {
-            XCTAssertEqual(thumb.format, "jpeg")
             let data = try await reader.getThumbnail(at: i)
             XCTAssertFalse(data.isEmpty)
-            // Verify JPEG header
-            XCTAssertEqual(data[0], 0xFF)
-            XCTAssertEqual(data[1], 0xD8)
+            // Verify it's a valid image
+            let image = NSImage(data: data)
+            XCTAssertNotNil(image, "CR3 thumbnail \(i) (\(thumb.format)) is not a valid image")
         }
 
         print(
