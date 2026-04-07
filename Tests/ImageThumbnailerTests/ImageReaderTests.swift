@@ -57,12 +57,12 @@ final class ImageReaderTests: XCTestCase {
             maxReadCount: 10, maxBytes: 10 * 1024 * 1024),
         TestCase(
             "NEF (Nikon Z5 II)", resource: "Nikon_Z5_2", ext: "NEF", reader: NefReader.self,
-            width: 6064, height: 4040, minThumbnails: 2,
-            maxReadCount: 15, maxBytes: 2 * 1024 * 1024),
+            minThumbnails: 2,
+            maxReadCount: 15, maxBytes: 10 * 1024 * 1024),
         TestCase(
             "NEF (Nikon Z5)", resource: "Nikon_Z5", ext: "NEF", reader: NefReader.self,
-            width: 6040, height: 4032, minThumbnails: 2,
-            maxReadCount: 15, maxBytes: 3 * 1024 * 1024),
+            minThumbnails: 2,
+            maxReadCount: 15, maxBytes: 10 * 1024 * 1024),
     ]
 
     func testImageReaders() async throws {

@@ -16,10 +16,11 @@ jobs:
       - name: Download test resources
         run: |
           cd Tests/ImageThumbnailerTests/Resources
-          curl -fL -o "DSC04618.ARW" "https://raw.pixls.us/data/SONY/ILCE-6000/DSC02592.ARW" || true
+          # Download public samples (|| true to not fail CI if download fails)
+          curl -fL -o "DSC04618.ARW" "https://raw.pixls.us/data/Sony/ILCE-6000/DSC01542.ARW" || true
           curl -fL -o "IMG_5885.DNG" "https://raw.pixls.us/data/Apple/iPhone%2012%20Pro/IMG_1361.DNG" || true
           curl -fL -o "Nikon_Z5_2.NEF" "https://raw.pixls.us/data/Nikon/Z%208/Nikon_Z8_high_efficiency_low.NEF" || true
-          curl -fL -o "Nikon_Z5.NEF" "https://raw.pixls.us/data/Nikon/Z%205/DSC_0514.NEF" || true
+          curl -fL -o "Nikon_Z5.NEF" "https://raw.pixls.us/data/Nikon/Z%205/DSC_0520.NEF" || true
           ls -lh
 
       - name: Build
