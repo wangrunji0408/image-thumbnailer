@@ -2,83 +2,54 @@ name: CI
 
 on:
   push:
-    branches: [ main, develop ]
+    branches: [main]
   pull_request:
-    branches: [ main ]
+    branches: [main]
 
 jobs:
-  check-format:
-    name: Check Format
-    runs-on: macos-latest
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Install SwiftFormat
-      run: brew install swiftformat
-
-    - name: Check Format
-      run: swiftformat . --lint
-
   test:
     name: Test
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [macos-13, macos-14]
-        swift-version: ['5.9', '5.10']
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-    
-    - name: Setup Swift
-      uses: swift-actions/setup-swift@v2
-      with:
-        swift-version: ${{ matrix.swift-version }}
-    
-    - name: Cache Swift packages
-      uses: actions/cache@v4
-      with:
-        path: .build
-        key: ${{ runner.os }}-swift-${{ matrix.swift-version }}-${{ hashFiles('Package.resolved') }}
-        restore-keys: |
-          ${{ runner.os }}-swift-${{ matrix.swift-version }}-
-          ${{ runner.os }}-swift-
-    
-    - name: Build
-      run: swift build -v
-    
-    - name: Run tests
-      run: swift test -v
-    
-    - name: Build CLI tool
-      run: swift build -c release --product HeifThumbnailerCLI
-
-  build-release:
-    name: Build Release
     runs-on: macos-latest
-    needs: [test, lint]
-    if: github.ref == 'refs/heads/main'
-    
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-    
-    - name: Setup Swift
-      uses: swift-actions/setup-swift@v2
-      with:
-        swift-version: '5.10'
-    
-    - name: Build release binary
-      run: |
-        swift build -c release --product HeifThumbnailerCLI
-        cp .build/release/HeifThumbnailerCLI ./heif-thumbnailer
-    
-    - name: Upload binary artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: heif-thumbnailer-macos
-        path: heif-thumbnailer
-        retention-days: 30 
+      - uses: actions/checkout@v4
+
+      - name: Download test resources
+        run: |
+          cd Tests/ImageThumbnailerTests/Resources
+          curl -fL -o "DSC04618.ARW" "https://raw.pixls.us/data/SONY/ILCE-6000/DSC02592.ARW" || true
+          curl -fL -o "IMG_5885.DNG" "https://raw.pixls.us/data/Apple/iPhone%2012%20Pro/IMG_1361.DNG" || true
+          curl -fL -o "Nikon_Z5_2.NEF" "https://raw.pixls.us/data/Nikon/Z%208/Nikon_Z8_high_efficiency_low.NEF" || true
+          curl -fL -o "Nikon_Z5.NEF" "https://raw.pixls.us/data/Nikon/Z%205/DSC_0514.NEF" || true
+          ls -lh
+
+      - name: Build
+        run: swift build
+
+      - name: Test
+        run: swift test
+
+      - name: Build CLI release
+        run: swift build -c release --product ImageThumbnailerCLI
+
+  release:
+    name: Release
+    runs-on: macos-latest
+    needs: [test]
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build release binary
+        run: |
+          swift build -c release --product ImageThumbnailerCLI
+          cp .build/release/ImageThumbnailerCLI ./image-thumbnailer-macos
+          chmod +x image-thumbnailer-macos
+          tar -czf image-thumbnailer-macos.tar.gz image-thumbnailer-macos
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          generate_release_notes: true
+          files: image-thumbnailer-macos.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -56,11 +56,11 @@ final class ImageReaderTests: XCTestCase {
             "DNG", resource: "IMG_5885", ext: "DNG", reader: DngReader.self,
             maxReadCount: 10, maxBytes: 10 * 1024 * 1024),
         TestCase(
-            "NEF (efficient)", resource: "高效压缩raw", ext: "NEF", reader: NefReader.self,
+            "NEF (Nikon Z5 II)", resource: "Nikon_Z5_2", ext: "NEF", reader: NefReader.self,
             width: 6064, height: 4040, minThumbnails: 2,
             maxReadCount: 15, maxBytes: 2 * 1024 * 1024),
         TestCase(
-            "NEF (lossless)", resource: "无损压缩raw", ext: "NEF", reader: NefReader.self,
+            "NEF (Nikon Z5)", resource: "Nikon_Z5", ext: "NEF", reader: NefReader.self,
             width: 6040, height: 4032, minThumbnails: 2,
             maxReadCount: 15, maxBytes: 3 * 1024 * 1024),
     ]
