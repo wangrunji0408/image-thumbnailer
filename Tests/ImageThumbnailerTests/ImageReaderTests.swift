@@ -159,6 +159,37 @@ final class ImageReaderTests: XCTestCase {
         XCTAssertGreaterThan(data.count, 100 * 1024)
     }
 
+    func testCr3Reader() async throws {
+        guard
+            let url = Bundle.module.url(
+                forResource: "Canon_EOS_R5", withExtension: "CR3",
+                subdirectory: "Resources/samples")
+        else {
+            throw XCTSkip("Canon_EOS_R5.CR3 not found")
+        }
+        let reader = Cr3Reader(readAt: Self.fileReadAt(url))
+
+        let metadata = try await reader.getMetadata()
+        XCTAssertEqual(metadata.width, 8192)
+        XCTAssertEqual(metadata.height, 5464)
+
+        let thumbnails = try await reader.getThumbnailList()
+        XCTAssertGreaterThanOrEqual(thumbnails.count, 2)
+
+        for (i, thumb) in thumbnails.enumerated() {
+            XCTAssertEqual(thumb.format, "jpeg")
+            let data = try await reader.getThumbnail(at: i)
+            XCTAssertFalse(data.isEmpty)
+            // Verify JPEG header
+            XCTAssertEqual(data[0], 0xFF)
+            XCTAssertEqual(data[1], 0xD8)
+        }
+
+        print(
+            "CR3 - thumbnails: \(thumbnails.count), sizes: \(thumbnails.map { "\($0.width ?? 0)x\($0.height ?? 0)" }.joined(separator: ", "))"
+        )
+    }
+
     func testInvalidIndex() async throws {
         let url = try XCTUnwrap(Bundle.module.url(forResource: "iPhone", withExtension: "HEIC"))
         let reader = HeifReader(readAt: Self.fileReadAt(url))

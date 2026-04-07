@@ -71,6 +71,8 @@ struct ImageThumbnailCLI: AsyncParsableCommand {
                 reader = Rw2Reader(readAt: readAt)
             case "cr2":
                 reader = Cr2Reader(readAt: readAt)
+            case "cr3":
+                reader = Cr3Reader(readAt: readAt)
             case "mp4", "mov":
                 reader = Mp4Reader(readAt: readAt)
             default:
