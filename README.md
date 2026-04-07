@@ -1,12 +1,33 @@
 # ImageThumbnailer
 
-A fast and efficient Swift library for extracting thumbnails from various image formats including HEIF, JPEG, and Sony ARW files.
+A fast and efficient Swift library for extracting embedded thumbnails from various image and video formats. Designed for minimal I/O - reads only the metadata and thumbnail data, not the full file.
+
+## Supported Formats
+
+| Format | Extension | Metadata | Thumbnails | Notes |
+|--------|-----------|----------|------------|-------|
+| HEIF/HEIC | .heic, .heif, .hif | Yes | Yes | iPhone, Canon HIF, etc. |
+| JPEG | .jpg, .jpeg | Yes | Yes | EXIF + MPF multi-frame |
+| Sony ARW | .arw | Yes | Yes | Multiple thumbnails |
+| Adobe DNG | .dng | Yes | Yes | Including Apple ProRAW |
+| Nikon NEF | .nef | Yes | Yes | Lossless & efficient compression |
+| Pentax PEF | .pef | Yes | Yes | Standard TIFF-based |
+| Panasonic RW2 | .rw2 | Yes | Yes | Via JpgFromRaw tag |
+| Olympus ORF | .orf | Yes | No | Metadata only; thumbnails in MakerNotes |
+| MP4/MOV | .mp4, .mov | Yes | Yes | HEVC, H.264; first frame extraction |
+
+### Not Yet Supported
+
+| Format | Extension | Notes |
+|--------|-----------|-------|
+| Canon CR3 | .cr3 | ISO BMFF container, needs dedicated parser |
+| Canon CR2 | .cr2 | TIFF-based, may work with TiffReader |
+| Fujifilm RAF | .raf | Proprietary format |
+| Sigma X3F | .x3f | Proprietary format |
 
 ## Installation
 
 ### Swift Package Manager
-
-Add this to your `Package.swift`:
 
 ```swift
 dependencies: [
@@ -23,31 +44,24 @@ import ImageThumbnailer
 
 // Create a read function for your image file
 let readAt: (UInt64, UInt32) async throws -> Data = { offset, length in
-    // Your file reading implementation
-    return fileData.subdata(in: Int(offset)..<Int(offset + length))
+    let fileHandle = try FileHandle(forReadingFrom: url)
+    defer { fileHandle.closeFile() }
+    try fileHandle.seek(toOffset: offset)
+    return fileHandle.readData(ofLength: Int(length))
 }
 
-// Extract thumbnail with minimum 200px short side
-// For HEIF/HEIC files
-if let thumbnail = try await readHeifThumbnail(readAt: readAt, minShortSide: 200) {
-    print("Extracted thumbnail: \(thumbnail.width)x\(thumbnail.height)")
-    // Use thumbnail.data for the image data
+// Use the appropriate reader for your format
+let reader = HeifReader(readAt: readAt)  // or JpegReader, ArwReader, NefReader, etc.
+
+let metadata = try await reader.getMetadata()
+print("Image: \(metadata.width)x\(metadata.height)")
+
+let thumbnails = try await reader.getThumbnailList()
+for (i, info) in thumbnails.enumerated() {
+    print("[\(i)] \(info.format) \(info.width ?? 0)x\(info.height ?? 0) (\(info.size) bytes)")
 }
 
-// For JPEG files
-if let thumbnail = try await readJpegThumbnail(readAt: readAt, minShortSide: 200) {
-    print("Extracted JPEG thumbnail: \(thumbnail.width)x\(thumbnail.height)")
-}
-
-// For Sony ARW files
-if let thumbnail = try await readSonyArwThumbnail(readAt: readAt, minShortSide: 200) {
-    print("Extracted Sony ARW thumbnail: \(thumbnail.width)x\(thumbnail.height)")
-}
-
-// Or get as platform image (UIImage/NSImage)
-if let image = try await readHeifThumbnailAsImage(readAt: readAt, minShortSide: 200) {
-    // Use the image directly
-}
+let thumbnailData = try await reader.getThumbnail(at: 0)
 ```
 
 ### Command Line Usage
@@ -55,24 +69,20 @@ if let image = try await readHeifThumbnailAsImage(readAt: readAt, minShortSide: 
 ```bash
 # Extract thumbnail from various image formats
 swift run ImageThumbnailerCLI input.heic
-swift run ImageThumbnailerCLI input.jpg
+swift run ImageThumbnailerCLI input.nef
 swift run ImageThumbnailerCLI input.arw
 
 # Extract with minimum 300px short side
 swift run ImageThumbnailerCLI input.heic -s 300
+
+# Specify output path
+swift run ImageThumbnailerCLI input.dng -o thumbnail.jpg
 ```
-
-## Supported Formats
-
-- HEIF/HEIC files
-- JPEG files
-- Sony ARW files
-- More formats coming soon
 
 ## Requirements
 
 - Swift 5.9+
-- macOS 11.0+ / iOS 12.0+
+- macOS 11.0+ / iOS 14.0+
 
 ## License
 
