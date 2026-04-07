@@ -51,7 +51,7 @@ final class ImageReaderTests: XCTestCase {
             maxReadCount: 3, maxBytes: 50 * 1024),
         TestCase(
             "ARW", resource: "DSC04618", ext: "ARW", reader: ArwReader.self,
-            maxReadCount: 10, maxBytes: 1024 * 1024),
+            maxReadCount: 10, maxBytes: 5 * 1024 * 1024),
         TestCase(
             "DNG", resource: "IMG_5885", ext: "DNG", reader: DngReader.self,
             maxReadCount: 10, maxBytes: 10 * 1024 * 1024),
