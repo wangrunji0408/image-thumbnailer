@@ -271,9 +271,8 @@ public class TiffReader: ImageReader {
 
         // Add thumbnail entry if we found valid JPEG data in this IFD
         if let thumbnailOffset = thumbnailOffset, let thumbnailLength = thumbnailLength {
-            // Verify it's actually JPEG data before adding
-            let isJpeg = (try? await reader.read(at: UInt64(thumbnailOffset), length: 2))
-                == Data([0xFF, 0xD8])
+            // Verify it's actually a standard (lossy) JPEG, not lossless JPEG (e.g., CR2 raw data)
+            let isJpeg = try await isStandardJpeg(at: UInt64(thumbnailOffset), length: thumbnailLength)
             if isJpeg {
                 if thumbnailWidth == nil || thumbnailHeight == nil {
                     if let (w, h) = try await extractImageDimensions(
@@ -394,6 +393,45 @@ public class TiffReader: ImageReader {
         case 8: return 270  // Left-bottom (rotate 270 CW or 90 CCW)
         default: return 0  // Default to no rotation for unknown orientations
         }
+    }
+
+    /// Check if data is a standard (lossy) JPEG, not lossless JPEG used in RAW formats like CR2.
+    /// Lossless JPEG (SOF3/SOF7/SOF11/SOF15) starts with FF D8 but contains raw sensor data.
+    private func isStandardJpeg(at imageOffset: UInt64, length: UInt32) async throws -> Bool {
+        guard (try? await reader.read(at: imageOffset, length: 2)) == Data([0xFF, 0xD8]) else {
+            return false
+        }
+
+        var offset = imageOffset + 2
+        let maxOffset = imageOffset + UInt64(min(length, 4096))
+
+        while offset < maxOffset {
+            let marker = try await reader.readUInt16(at: offset, byteOrder: .bigEndian)
+            guard (marker & 0xFF00) == 0xFF00 else { break }
+
+            let markerType = UInt8(marker & 0xFF)
+
+            // Lossless SOF markers: SOF3(0xC3), SOF7(0xC7), SOF11(0xCB), SOF15(0xCF)
+            if markerType == 0xC3 || markerType == 0xC7 || markerType == 0xCB
+                || markerType == 0xCF
+            {
+                return false
+            }
+
+            // Standard (lossy) SOF markers found → valid JPEG thumbnail
+            if (markerType >= 0xC0 && markerType <= 0xCF) && markerType != 0xC4
+                && markerType != 0xC8 && markerType != 0xCC
+            {
+                return true
+            }
+
+            let segmentLength = try await reader.readUInt16(
+                at: offset + 2, byteOrder: .bigEndian)
+            if segmentLength < 2 { break }
+            offset += 2 + UInt64(segmentLength)
+        }
+
+        return true  // No SOF found yet, assume standard JPEG
     }
 
     private func extractImageDimensions(at imageOffset: UInt64, length: UInt32) async throws
