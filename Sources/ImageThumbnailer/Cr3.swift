@@ -180,11 +180,13 @@ public class Cr3Reader: ImageReader {
                     )
                 } else {
                     // THMB v1: HEVC thumbnail
-                    // Header: version(1) + pad(3) + unk(2) + width(2) + unk(4) + dataSize(4) = 16 bytes
+                    // Header: version(1) + pad(3) + codec(2) + width(2) + height(2) + unk(2) + dataSize(4) = 16 bytes
                     // Followed by sub-boxes: CISZ, hvcC, colr, pixi, IMGD
                     let thmbEnd = offset + UInt64(boxSize)
-                    var thmbWidth: UInt32 = 0
-                    var thmbHeight: UInt32 = 0
+                    let thmbWidth = UInt32(try await reader.readUInt16(
+                        at: dataStart + 6, byteOrder: .bigEndian))
+                    let thmbHeight = UInt32(try await reader.readUInt16(
+                        at: dataStart + 8, byteOrder: .bigEndian))
                     var hvcCData: Data?
                     var imgdOffset: UInt64 = 0
                     var imgdSize: UInt32 = 0
@@ -198,13 +200,6 @@ public class Cr3Reader: ImageReader {
                         guard subSize >= 8 else { break }
 
                         switch subType {
-                        case "CISZ":
-                            if subSize >= 20 {
-                                thmbWidth = try await reader.readUInt32(
-                                    at: subOff + 12, byteOrder: .bigEndian)
-                                thmbHeight = try await reader.readUInt32(
-                                    at: subOff + 16, byteOrder: .bigEndian)
-                            }
                         case "hvcC":
                             hvcCData = try await reader.read(
                                 at: subOff + 8, length: subSize - 8)
