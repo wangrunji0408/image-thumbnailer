@@ -7,21 +7,21 @@ private let logger = Logger(subsystem: "com.wangrunji.ImageThumbnailer", categor
 
 // MARK: - TiffReader Implementation
 
-/// Generic TIFF-based image reader for formats like DNG and ARW
+/// Generic TIFF-based image reader for formats like DNG, ARW, and NEF
 public class TiffReader: ImageReader {
     private let reader: Reader
     private var thumbnailEntries: [ThumbnailEntry]?
     private var metadata: Metadata?
     private var orientation: UInt16?
 
-    /// Strategy for determining main image dimensions in IFD0
+    /// Strategy for determining main image dimensions
     /// - useIfd0: Use ImageWidth/ImageHeight from IFD0 directly (ARW)
-    /// - useSubIfd: Use dimensions from SubIFD tag (DNG)
+    /// - useSubIfd: Use dimensions from SubIFD tag (DNG, NEF)
     private let mainImageStrategy: MainImageStrategy
 
     public enum MainImageStrategy {
         case useIfd0  // ARW: Main image dimensions are in IFD0
-        case useSubIfd  // DNG: Main image dimensions are in SubIFD
+        case useSubIfd  // DNG/NEF: Main image dimensions are in SubIFD
     }
 
     public init(
@@ -130,7 +130,7 @@ public class TiffReader: ImageReader {
 
             let tag = try await reader.readUInt16(at: entryOffset)
             let type = try await reader.readUInt16(at: entryOffset + 2)
-            // let count = try await reader.readUInt32(offset: entryOffset + 4)
+            let count = try await reader.readUInt32(at: entryOffset + 4)
             let value =
                 if type == 3 {
                     try UInt32(await reader.readUInt16(at: entryOffset + 8))
@@ -196,25 +196,54 @@ public class TiffReader: ImageReader {
                 }
 
             case 0x014A:  // SubIFD
-                let subIfdOffset = value
-                let subIfdDimensions = try await parseSubIFDForDimensions(
-                    subIfdOffset: UInt64(subIfdOffset))
-
-                switch mainImageStrategy {
-                case .useIfd0:
-                    // ARW: Use SubIFD dimensions for main image if in IFD0
-                    if ifdIndex == 0 {
-                        mainWidth = subIfdDimensions.width
-                        mainHeight = subIfdDimensions.height
-                    } else {
-                        thumbnailWidth = subIfdDimensions.width
-                        thumbnailHeight = subIfdDimensions.height
+                // Read all SubIFD offsets. When count > 1, value is a pointer to an array of offsets.
+                var subIfdOffsets: [UInt32] = []
+                if count == 1 {
+                    subIfdOffsets = [value]
+                } else {
+                    let dataOffset = value  // points to array of LONG values
+                    try await reader.prefetch(at: UInt64(dataOffset), length: count * 4)
+                    for j in 0..<count {
+                        let offset = try await reader.readUInt32(
+                            at: UInt64(dataOffset) + UInt64(j) * 4)
+                        subIfdOffsets.append(offset)
                     }
-                case .useSubIfd:
-                    // DNG: Always use SubIFD dimensions for main image if in IFD0
-                    if ifdIndex == 0 {
-                        mainWidth = subIfdDimensions.width
-                        mainHeight = subIfdDimensions.height
+                }
+
+                for subIfdOffset in subIfdOffsets {
+                    let subIfdResult = try await parseSubIFD(subIfdOffset: UInt64(subIfdOffset))
+
+                    // Use SubIFD with SubfileType==0 for main image dimensions
+                    if subIfdResult.subfileType == 0 {
+                        if mainImageStrategy == .useSubIfd && ifdIndex == 0 {
+                            mainWidth = subIfdResult.width
+                            mainHeight = subIfdResult.height
+                        } else if mainImageStrategy == .useIfd0 && ifdIndex == 0 {
+                            mainWidth = subIfdResult.width
+                            mainHeight = subIfdResult.height
+                        }
+                    }
+
+                    // Collect JPEG thumbnails from SubIFDs
+                    if let tOffset = subIfdResult.thumbnailOffset,
+                        let tLength = subIfdResult.thumbnailLength
+                    {
+                        var tWidth = subIfdResult.thumbnailWidth
+                        var tHeight = subIfdResult.thumbnailHeight
+                        if tWidth == nil || tHeight == nil {
+                            if let (w, h) = try await extractImageDimensions(
+                                at: UInt64(tOffset), length: tLength)
+                            {
+                                tWidth = w
+                                tHeight = h
+                            }
+                        }
+                        let entry = ThumbnailEntry(
+                            offset: tOffset, length: tLength, width: tWidth, height: tHeight)
+                        entries.append(entry)
+                        logger.debug(
+                            "Found SubIFD JPEG thumbnail: offset=\(tOffset), length=\(tLength), width=\(tWidth ?? 0), height=\(tHeight ?? 0)"
+                        )
                     }
                 }
 
@@ -223,29 +252,33 @@ public class TiffReader: ImageReader {
             }
         }
 
-        // Add thumbnail entry if we found valid thumbnail data
+        // Add thumbnail entry if we found valid JPEG data in this IFD
         if let thumbnailOffset = thumbnailOffset, let thumbnailLength = thumbnailLength {
-            // If dimensions not found in IFD, extract from JPEG data
-            if thumbnailWidth == nil || thumbnailHeight == nil {
-                if let (w, h) = try await extractImageDimensions(
-                    at: UInt64(thumbnailOffset), length: thumbnailLength)
-                {
-                    thumbnailWidth = w
-                    thumbnailHeight = h
-                    logger.debug("Extracted thumbnail dimensions from SOF: \(w)x\(h)")
+            // Verify it's actually JPEG data before adding
+            let isJpeg = (try? await reader.read(at: UInt64(thumbnailOffset), length: 2))
+                == Data([0xFF, 0xD8])
+            if isJpeg {
+                if thumbnailWidth == nil || thumbnailHeight == nil {
+                    if let (w, h) = try await extractImageDimensions(
+                        at: UInt64(thumbnailOffset), length: thumbnailLength)
+                    {
+                        thumbnailWidth = w
+                        thumbnailHeight = h
+                        logger.debug("Extracted thumbnail dimensions from SOF: \(w)x\(h)")
+                    }
                 }
-            }
 
-            let entry = ThumbnailEntry(
-                offset: thumbnailOffset,
-                length: thumbnailLength,
-                width: thumbnailWidth,
-                height: thumbnailHeight
-            )
-            entries.append(entry)
-            logger.debug(
-                "Found JPEG thumbnail: offset=\(thumbnailOffset), length=\(thumbnailLength), width=\(thumbnailWidth ?? 0), height=\(thumbnailHeight ?? 0)"
-            )
+                let entry = ThumbnailEntry(
+                    offset: thumbnailOffset,
+                    length: thumbnailLength,
+                    width: thumbnailWidth,
+                    height: thumbnailHeight
+                )
+                entries.append(entry)
+                logger.debug(
+                    "Found JPEG thumbnail: offset=\(thumbnailOffset), length=\(thumbnailLength), width=\(thumbnailWidth ?? 0), height=\(thumbnailHeight ?? 0)"
+                )
+            }
         }
 
         // Read next IFD offset
@@ -255,22 +288,27 @@ public class TiffReader: ImageReader {
         return nextIfdOffset
     }
 
-    private func parseSubIFDForDimensions(subIfdOffset: UInt64) async throws -> (
-        width: UInt32, height: UInt32
-    ) {
-        // Read SubIFD header
+    private struct SubIFDResult {
+        var subfileType: UInt32?
+        var width: UInt32 = 0
+        var height: UInt32 = 0
+        var thumbnailOffset: UInt32?
+        var thumbnailLength: UInt32?
+        var thumbnailWidth: UInt32?
+        var thumbnailHeight: UInt32?
+    }
+
+    private func parseSubIFD(subIfdOffset: UInt64) async throws -> SubIFDResult {
         try await reader.prefetch(at: subIfdOffset, length: 1024)
         let entryCount = try await reader.readUInt16(at: subIfdOffset)
 
-        var width: UInt32 = 0
-        var height: UInt32 = 0
+        var result = SubIFDResult()
 
         for i in 0..<Int(entryCount) {
             let entryOffset = subIfdOffset + 2 + UInt64(i) * 12
 
             let tag = try await reader.readUInt16(at: entryOffset)
             let type = try await reader.readUInt16(at: entryOffset + 2)
-            // let count = try await reader.readUInt32(offset: entryOffset + 4)
             let value =
                 if type == 3 {
                     try UInt32(await reader.readUInt16(at: entryOffset + 8))
@@ -279,16 +317,30 @@ public class TiffReader: ImageReader {
                 }
 
             switch tag {
+            case 0x00FE:  // SubfileType
+                result.subfileType = value
             case 0x0100:  // ImageWidth
-                width = value
+                if result.subfileType == 0 {
+                    result.width = value
+                } else {
+                    result.thumbnailWidth = value
+                }
             case 0x0101:  // ImageHeight
-                height = value
+                if result.subfileType == 0 {
+                    result.height = value
+                } else {
+                    result.thumbnailHeight = value
+                }
+            case 0x0201:  // JPEGInterchangeFormat
+                result.thumbnailOffset = value
+            case 0x0202:  // JPEGInterchangeFormatLength
+                result.thumbnailLength = value
             default:
                 break
             }
         }
 
-        return (width, height)
+        return result
     }
 
     private func parseTiffHeader() async throws -> UInt32 {

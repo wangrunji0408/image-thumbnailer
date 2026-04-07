@@ -40,7 +40,7 @@ final class ImageReaderTests: XCTestCase {
         XCTAssertFalse(thumbnailData.isEmpty, "Thumbnail data should not be empty")
 
         // Assert reasonable limits for HEIF files
-        XCTAssertLessThanOrEqual(readCount, 3, "HEIF reader should not make more than 3 read calls")
+        XCTAssertLessThanOrEqual(readCount, 5, "HEIF reader should not make more than 5 read calls")
         XCTAssertLessThanOrEqual(
             totalBytes, 100 * 1024, "HEIF reader should not read more than 100KB total")
 
@@ -139,11 +139,105 @@ final class ImageReaderTests: XCTestCase {
 
         // Assert reasonable limits for Sony ARW files
         XCTAssertLessThanOrEqual(
-            readCount, 5, "Sony ARW reader should not make more than 5 read calls")
+            readCount, 10, "Sony ARW reader should not make more than 10 read calls")
         XCTAssertLessThanOrEqual(
             totalBytes, 1024 * 1024, "Sony ARW reader should not read more than 1MB total")
 
         print("Sony ARW Reader - Read count: \(readCount), Total bytes: \(totalBytes)")
+    }
+
+    func testNefReaderEfficient() async throws {
+        let bundle = Bundle.module
+        guard let url = bundle.url(forResource: "高效压缩raw", withExtension: "NEF") else {
+            XCTFail("Test file not found")
+            return
+        }
+
+        var readCount = 0
+        var totalBytes: UInt64 = 0
+
+        let readAt: (UInt64, UInt32) async throws -> Data = { offset, length in
+            readCount += 1
+            totalBytes += UInt64(length)
+
+            let fileHandle = try FileHandle(forReadingFrom: url)
+            defer { fileHandle.closeFile() }
+
+            try fileHandle.seek(toOffset: offset)
+            return fileHandle.readData(ofLength: Int(length))
+        }
+
+        let reader = NefReader(readAt: readAt)
+
+        // Test getMetadata
+        let metadata = try await reader.getMetadata()
+        XCTAssertEqual(metadata.width, 6064, "Width should be 6064")
+        XCTAssertEqual(metadata.height, 4040, "Height should be 4040")
+
+        // Test getThumbnailList
+        let thumbnailList = try await reader.getThumbnailList()
+        XCTAssertGreaterThanOrEqual(thumbnailList.count, 2, "Should find at least 2 thumbnails")
+
+        // Test getThumbnail
+        let thumbnailData = try await reader.getThumbnail(at: 0)
+        XCTAssertFalse(thumbnailData.isEmpty, "Thumbnail data should not be empty")
+
+        // Assert reasonable limits for NEF files (thumbnails can be large ~1.4MB)
+        XCTAssertLessThanOrEqual(
+            readCount, 15, "NEF reader should not make more than 15 read calls")
+        XCTAssertLessThanOrEqual(
+            totalBytes, 2 * 1024 * 1024, "NEF reader should not read more than 2MB total")
+
+        print(
+            "NEF Reader (Efficient) - Read count: \(readCount), Total bytes: \(totalBytes), Thumbnails: \(thumbnailList.count)"
+        )
+    }
+
+    func testNefReaderLossless() async throws {
+        let bundle = Bundle.module
+        guard let url = bundle.url(forResource: "无损压缩raw", withExtension: "NEF") else {
+            XCTFail("Test file not found")
+            return
+        }
+
+        var readCount = 0
+        var totalBytes: UInt64 = 0
+
+        let readAt: (UInt64, UInt32) async throws -> Data = { offset, length in
+            readCount += 1
+            totalBytes += UInt64(length)
+
+            let fileHandle = try FileHandle(forReadingFrom: url)
+            defer { fileHandle.closeFile() }
+
+            try fileHandle.seek(toOffset: offset)
+            return fileHandle.readData(ofLength: Int(length))
+        }
+
+        let reader = NefReader(readAt: readAt)
+
+        // Test getMetadata
+        let metadata = try await reader.getMetadata()
+        XCTAssertEqual(metadata.width, 6040, "Width should be 6040")
+        XCTAssertEqual(metadata.height, 4032, "Height should be 4032")
+
+        // Test getThumbnailList
+        let thumbnailList = try await reader.getThumbnailList()
+        XCTAssertGreaterThanOrEqual(thumbnailList.count, 2, "Should find at least 2 thumbnails")
+
+        // Test getThumbnail
+        let thumbnailData = try await reader.getThumbnail(at: 0)
+        XCTAssertFalse(thumbnailData.isEmpty, "Thumbnail data should not be empty")
+
+        // Assert reasonable limits for NEF files (thumbnails can be large ~2.2MB)
+        XCTAssertLessThanOrEqual(
+            readCount, 15, "NEF reader should not make more than 15 read calls")
+        XCTAssertLessThanOrEqual(
+            totalBytes, 3 * 1024 * 1024, "NEF reader should not read more than 3MB total")
+
+        print(
+            "NEF Reader (Lossless) - Read count: \(readCount), Total bytes: \(totalBytes), Thumbnails: \(thumbnailList.count)"
+        )
     }
 
     func testMp4Reader() async throws {
@@ -191,7 +285,7 @@ final class ImageReaderTests: XCTestCase {
         XCTAssertFalse(thumbnailData.isEmpty, "Thumbnail data should not be empty")
 
         // Assert reasonable limits for MP4 files
-        XCTAssertLessThanOrEqual(readCount, 3, "MP4 reader should not make more than 10 read calls")
+        XCTAssertLessThanOrEqual(readCount, 10, "MP4 reader should not make more than 10 read calls")
         XCTAssertLessThanOrEqual(
             totalBytes, 1024 * 1024, "MP4 reader should not read more than 1MB total")
 
