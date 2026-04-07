@@ -415,6 +415,32 @@ public class TiffReader: ImageReader {
     }
 }
 
+// MARK: - TIFF-based RAW Format Readers
+
+/// Sony ARW (RAW) image reader
+/// ARW files are TIFF-based, with main image dimensions in IFD0 or SubIFD
+public class ArwReader: TiffReader {
+    public required init(readAt: @escaping (UInt64, UInt32) async throws -> Data) {
+        super.init(readAt: readAt, mainImageStrategy: .useIfd0)
+    }
+}
+
+/// Adobe DNG (Digital Negative) image reader
+/// DNG files are TIFF-based, with main image dimensions in SubIFD
+public class DngReader: TiffReader {
+    public required init(readAt: @escaping (UInt64, UInt32) async throws -> Data) {
+        super.init(readAt: readAt, mainImageStrategy: .useSubIfd)
+    }
+}
+
+/// Nikon NEF (RAW) image reader
+/// NEF files are TIFF-based, with main image dimensions in SubIFD (SubfileType==0)
+public class NefReader: TiffReader {
+    public required init(readAt: @escaping (UInt64, UInt32) async throws -> Data) {
+        super.init(readAt: readAt, mainImageStrategy: .useSubIfd)
+    }
+}
+
 // MARK: - Internal Types
 
 private struct ThumbnailEntry {
