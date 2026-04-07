@@ -484,6 +484,14 @@ public class Rw2Reader: TiffReader {
     }
 }
 
+/// Canon CR2 (RAW) image reader
+/// CR2 files are TIFF-based
+public class Cr2Reader: TiffReader {
+    public required init(readAt: @escaping (UInt64, UInt32) async throws -> Data) {
+        super.init(readAt: readAt, mainImageStrategy: .useIfd0)
+    }
+}
+
 // MARK: - Internal Types
 
 private struct ThumbnailEntry {

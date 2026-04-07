@@ -13,6 +13,7 @@ A fast and efficient Swift library for extracting embedded thumbnails from vario
 | Nikon NEF | .nef | Yes | Yes | Lossless & efficient compression |
 | Pentax PEF | .pef | Yes | Yes | Standard TIFF-based |
 | Panasonic RW2 | .rw2 | Yes | Yes | Via JpgFromRaw tag |
+| Canon CR2 | .cr2 | Yes | Yes | Standard TIFF-based |
 | Olympus ORF | .orf | Yes | No | Metadata only; thumbnails in MakerNotes |
 | MP4/MOV | .mp4, .mov | Yes | Yes | HEVC, H.264; first frame extraction |
 
@@ -21,7 +22,6 @@ A fast and efficient Swift library for extracting embedded thumbnails from vario
 | Format | Extension | Notes |
 |--------|-----------|-------|
 | Canon CR3 | .cr3 | ISO BMFF container, needs dedicated parser |
-| Canon CR2 | .cr2 | TIFF-based, may work with TiffReader |
 | Fujifilm RAF | .raf | Proprietary format |
 | Sigma X3F | .x3f | Proprietary format |
 
