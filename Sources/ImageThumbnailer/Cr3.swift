@@ -209,8 +209,9 @@ public class Cr3Reader: ImageReader {
                             hvcCData = try await reader.read(
                                 at: subOff + 8, length: subSize - 8)
                         case "IMGD":
-                            imgdOffset = subOff + 8
-                            imgdSize = subSize - 8
+                            // IMGD data has a 4-byte length prefix before the actual HEVC NAL units
+                            imgdOffset = subOff + 8 + 4
+                            imgdSize = subSize - 8 - 4
                         default:
                             break
                         }
