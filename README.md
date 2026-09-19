@@ -7,7 +7,7 @@ no full RAW decoding. Requires Swift 5.9+, macOS 11+ or iOS 14+ (library).
 ## Supported files
 
 HEIC/HEIF/HIF, JPEG, RAF, ARW, DNG, NEF, PEF, RW2, CR2, CR3, ORF and MP4/MOV
-(HEVC/H.264). ORF currently provides metadata only. A supported extension does not guarantee
+(HEVC/H.264/MJPEG). ORF currently provides metadata only. A supported extension does not guarantee
 that every vendor variant has an extractable preview.
 
 Metadata includes dimensions, GPS, duration, EXIF capture time and camera/lens/exposure
@@ -31,6 +31,12 @@ for (index, info) in try await reader.getThumbnailList().enumerated() {
     // Save data using info.format; honor info.rotation when displaying it.
 }
 ```
+
+MP4/MOV previews preserve the compressed first sample without decoding or re-encoding:
+HEVC uses HEIC (`heic` brand), H.264 uses HEIF (`avci` brand), and MJPEG is returned
+as JPEG. AVC must not advertise the HEVC-specific `heic` brand: ImageIO on OS 27
+can otherwise return an apparently valid image with entirely black pixels.
+HEIF/HEIC previews carry track rotation internally; JPEG uses `ThumbnailInfo.rotation`.
 
 Readers cache data from an immutable source; use one reader per file and serialize calls.
 Individual readers (`HeifReader`, `RafReader`, etc.) remain available directly.
@@ -84,7 +90,7 @@ python3 Tests/download_raf_samples.py
 REQUIRE_ALL_RESOURCES=1 RAF_SAMPLE_DIR="$PWD/build/raf-samples" swift test
 ```
 
-Only three HEIF fixtures are tracked. `ResourceManifest.json` records the complete local
+Three HEIF fixtures and four small [synthetic video fixtures](Tests/VideoFixtures.md) are tracked. `ResourceManifest.json` records the complete local
 library, SHA-256 hashes and ExifTool baselines; missing optional resources are skipped unless
 `REQUIRE_ALL_RESOURCES=1` is set. RAF sample sources are in `Tests/raf-samples.json`.
 

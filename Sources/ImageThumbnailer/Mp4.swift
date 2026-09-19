@@ -22,8 +22,9 @@ public class Mp4Reader: ImageReader {
         }
 
         return imageInfos?.map { info in
-            // For JPEG codec, return jpeg format; for HEVC/AVC, return heic format
-            let format = info.videoTrackInfo.codecType == "jpeg" ? "jpeg" : "heic"
+            // AVC uses HEIF with the avci brand; HEVC uses HEIC.
+            let codec = info.videoTrackInfo.codecType
+            let format = codec == "jpeg" ? "jpeg" : (codec == "avc1" || codec == "avc3" ? "heif" : "heic")
             // JPEG frames may need rotation, but HEIC already contains rotation metadata
             let rotation = info.videoTrackInfo.codecType == "jpeg" ? info.videoTrackInfo.rotation.map { Int($0) } : nil
 
@@ -518,7 +519,8 @@ public class Mp4Reader: ImageReader {
             rotation: trackInfo.rotation.map { Int($0) },
             width: trackInfo.width,
             height: trackInfo.height,
-            type: trackInfo.codecType,
+            // HEIF AVC image items use avc1, including samples from avc3 tracks.
+            type: trackInfo.codecType == "avc3" ? "avc1" : trackInfo.codecType,
             properties: createBasicVideoProperties(
                 width: trackInfo.width, height: trackInfo.height, videoConfig: trackInfo.hevcConfig,
                 rotation: trackInfo.rotation, codecType: trackInfo.codecType)

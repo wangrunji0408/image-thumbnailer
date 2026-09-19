@@ -9,7 +9,7 @@ class HEICWriter {
         buffer.removeAll()
 
         // Build HEIC structure
-        writeFtypBox()
+        writeFtypBox(itemType: thumbnail.type)
         let mdatOffsetPosition = writeMetaBox(for: thumbnail)
 
         // Update extent location to point to mdat box start
@@ -24,14 +24,17 @@ class HEICWriter {
 
     // MARK: - Box Writing Methods
 
-    private func writeFtypBox() {
+    private func writeFtypBox(itemType: String) {
+        // AVC image items must not advertise the HEVC-specific heic brand.
+        // ImageIO on OS 27 returns black pixels when AVC is mislabeled as heic.
+        let brand = itemType == "avc1" || itemType == "avc3" ? "avci" : "heic"
         let startPosition = buffer.count
         writeUInt32(0) // Size placeholder
         writeString("ftyp")
-        writeString("heic") // Major brand
+        writeString(brand) // Major brand
         writeUInt32(0) // Minor version
         writeString("mif1") // Compatible brands
-        writeString("heic")
+        writeString(brand)
         updateBoxSize(at: startPosition)
     }
 

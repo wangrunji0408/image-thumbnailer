@@ -161,7 +161,7 @@ final class ImageReaderTests: XCTestCase {
 
         let thumbnails = try await reader.getThumbnailList()
         XCTAssertFalse(thumbnails.isEmpty)
-        XCTAssertEqual(thumbnails[0].format, "heic")
+        XCTAssertEqual(thumbnails[0].format, "heif")
         XCTAssertEqual(thumbnails[0].width, 1920)
         XCTAssertEqual(thumbnails[0].height, 1080)
 

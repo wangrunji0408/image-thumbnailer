@@ -8,3 +8,9 @@ Tests/ImageThumbnailerTests/Resources/*
 
 # Python test helpers
 __pycache__/
+
+# Small synthetic video regression fixtures
+!Tests/ImageThumbnailerTests/Resources/AVC_Color.mp4
+!Tests/ImageThumbnailerTests/Resources/AVC_Black.mp4
+!Tests/ImageThumbnailerTests/Resources/HEVC_Color.mp4
+!Tests/ImageThumbnailerTests/Resources/MJPEG_Color.mov
