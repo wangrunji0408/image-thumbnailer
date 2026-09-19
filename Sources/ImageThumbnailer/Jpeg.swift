@@ -110,8 +110,14 @@ public class JpegReader: ImageReader {
         }
 
         // Look for MPF thumbnails
-        let mpfEntries = try await extractMPFThumbnails()
-        entries.append(contentsOf: mpfEntries)
+        do {
+            entries.append(contentsOf: try await extractMPFThumbnails())
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            try Task.checkCancellation()
+            logger.warning("Ignoring invalid JPEG MPF: \(error)")
+        }
 
         thumbnailEntries = entries
         if let existing = metadata, let exif {
@@ -120,17 +126,30 @@ public class JpegReader: ImageReader {
         }
     }
 
+    /// JPEG allows any number of FF fill bytes before a marker code.
+    private func skipMarkerPadding(at start: UInt64, limit: UInt64) async throws -> UInt64 {
+        var offset = start
+        while offset + 1 < limit,
+              try await reader.readUInt8(at: offset) == 0xFF,
+              try await reader.readUInt8(at: offset + 1) == 0xFF
+        {
+            offset += 1
+        }
+        return offset
+    }
+
     private func extractExifData() async throws -> (UInt64, UInt32)? {
         var offset: UInt64 = 2  // Skip JPEG SOI marker
 
         // Search for EXIF segment (APP1 with EXIF identifier)
-        while offset < 65536 {
-            let marker = try await reader.readUInt16(at: offset)
+        while offset + 4 <= 65536 {
+            offset = try await skipMarkerPadding(at: offset, limit: 65536)
+            let marker = try await reader.readUInt16(at: offset, byteOrder: .bigEndian)
             guard (marker & 0xFF00) == 0xFF00 else { break }
 
             let markerType = UInt8(marker & 0xFF)
             if markerType == 0xDA || markerType == 0xD9 { break }
-            let segmentLength = try await reader.readUInt16(at: offset + 2)
+            let segmentLength = try await reader.readUInt16(at: offset + 2, byteOrder: .bigEndian)
 
             if markerType == 0xE1 {  // APP1 segment
                 let header = try await reader.readString(at: UInt64(offset + 4), length: 4)
@@ -162,17 +181,22 @@ public class JpegReader: ImageReader {
         let maxOffset = imageOffset + UInt64(length)
 
         // Search for SOF marker
-        while offset < maxOffset {
+        while offset + 4 <= maxOffset {
+            offset = try await skipMarkerPadding(at: offset, limit: maxOffset)
             let marker = try await reader.readUInt16(at: offset, byteOrder: .bigEndian)
             guard (marker & 0xFF00) == 0xFF00 else { break }
 
             let markerType = UInt8(marker & 0xFF)
+            if markerType == 0xDA || markerType == 0xD9 { break }
             let segmentLength = try await reader.readUInt16(at: offset + 2, byteOrder: .bigEndian)
 
             // SOF markers: 0xC0-0xCF (except 0xC4, 0xC8, 0xCC which are not SOF)
             if (markerType >= 0xC0 && markerType <= 0xCF) && markerType != 0xC4
                 && markerType != 0xC8 && markerType != 0xCC
             {
+                guard segmentLength >= 8, offset + 2 + UInt64(segmentLength) <= maxOffset else {
+                    throw ImageReaderError.invalidData
+                }
                 let height = UInt32(
                     try await reader.readUInt16(at: offset + 5, byteOrder: .bigEndian))
                 let width = UInt32(
@@ -325,6 +349,7 @@ public class JpegReader: ImageReader {
 
         // Search for APP2 segments that contain MPF data
         while offset < 0x100000 {  // 1MB search range
+            offset = try await skipMarkerPadding(at: offset, limit: 0x100000)
             try await reader.prefetch(at: offset, length: 256)
             guard try await reader.readUInt8(at: offset) == 0xFF else {
                 break
@@ -516,29 +541,38 @@ public class JpegReader: ImageReader {
                 continue
             }
 
-            // MPF offsets are relative to the start of the APP2 segment
-            let absoluteOffset = UInt32(mpfOffset) + 4 + imageOffset
-
-            // Extract dimensions from MPF thumbnail JPEG data
-            var width: UInt32?
-            var height: UInt32?
-            if let (w, h) = try await extractImageDimensions(
-                at: UInt64(absoluteOffset), length: imageSize)
-            {
-                width = w
-                height = h
-                logger.debug("Extracted MPF thumbnail dimensions from SOF: \(w)x\(h)")
+            // MPF offsets are relative to the TIFF header following "MPF\0".
+            let absoluteOffset = mpfOffset + 4 + UInt64(imageOffset)
+            guard absoluteOffset <= UInt64(UInt32.max) else {
+                tempOffset += 16
+                continue
+            }
+            let width: UInt32
+            let height: UInt32
+            do {
+                guard let dimensions = try await extractImageDimensions(at: absoluteOffset, length: imageSize) else {
+                    tempOffset += 16
+                    continue
+                }
+                (width, height) = dimensions
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                try Task.checkCancellation()
+                logger.warning("Ignoring unreadable MPF preview: \(error)")
+                tempOffset += 16
+                continue
             }
 
             let thumbnailEntry = ThumbnailEntry(
-                offset: absoluteOffset,
+                offset: UInt32(absoluteOffset),
                 length: imageSize,
                 width: width,
                 height: height,
             )
             thumbnails.append(thumbnailEntry)
             logger.debug(
-                "Found MPF thumbnail: offset=\(absoluteOffset), size=\(imageSize), dimensions=\(width ?? 0)x\(height ?? 0), type=0x\(String(type, radix: 16))"
+                "Found MPF thumbnail: offset=\(absoluteOffset), size=\(imageSize), dimensions=\(width)x\(height), type=0x\(String(type, radix: 16))"
             )
 
             tempOffset += 16
