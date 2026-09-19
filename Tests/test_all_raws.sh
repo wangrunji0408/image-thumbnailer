@@ -27,7 +27,7 @@ process_file() {
 
     # Map extension to CLI reader
     case "$ext_lower" in
-        arw) ;;
+        arw|raf) ;;
         nef|nrw) ext_lower="nef" ;;
         dng) ;;
         pef) ;;
@@ -88,7 +88,7 @@ export -f process_file
 
 # Find all supported RAW files and process in parallel
 find "$DIR" -type f \( \
-    -iname "*.arw" -o -iname "*.nef" -o -iname "*.nrw" \
+    -iname "*.arw" -o -iname "*.raf" -o -iname "*.nef" -o -iname "*.nrw" \
     -o -iname "*.dng" -o -iname "*.pef" -o -iname "*.rw2" \
     -o -iname "*.orf" -o -iname "*.cr2" -o -iname "*.cr3" \
     \) 2>/dev/null | sort | xargs -P "$MAX_JOBS" -I {} bash -c 'process_file "$@"' _ {} "$DIR" "$CLI" \

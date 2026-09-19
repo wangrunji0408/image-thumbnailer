@@ -14,6 +14,7 @@ private let canonUUID: [UInt8] = [
 /// Canon CR3 (RAW) image reader
 /// CR3 files use ISOBMFF container with track-based structure
 public class Cr3Reader: ImageReader {
+    private var exif = ExifMetadata()
     private let reader: Reader
     private var thumbnailEntries: [Cr3ThumbnailEntry]?
     private var cachedMetadata: Metadata?
@@ -123,7 +124,8 @@ public class Cr3Reader: ImageReader {
         entries.sort { $0.size < $1.size }
 
         thumbnailEntries = entries
-        cachedMetadata = Metadata(width: mainWidth, height: mainHeight)
+        cachedMetadata = Metadata(width: mainWidth, height: mainHeight, location: exif.location,
+                                  captureTime: exif.captureTime, camera: exif.camera)
     }
 
     // MARK: - Canon UUID Box Parsing
@@ -153,6 +155,12 @@ public class Cr3Reader: ImageReader {
                 if dims.width > 0 { result.width = dims.width }
                 if dims.height > 0 { result.height = dims.height }
                 result.orientation = dims.orientation
+                var parser = ExifParser(reader: reader, offset: tiffStart, length: UInt64(boxSize - 8))
+                exif = try await parser.parse(into: exif)
+
+            case "CMT2", "CMT4":
+                var parser = ExifParser(reader: reader, offset: offset + 8, length: UInt64(boxSize - 8))
+                exif = try await parser.parse(gps: boxType == "CMT4", into: exif)
 
             case "THMB":
                 let dataStart = offset + 8

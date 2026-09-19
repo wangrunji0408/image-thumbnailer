@@ -41,27 +41,27 @@ final class ImageReaderTests: XCTestCase {
 
     static let testCases: [TestCase] = [
         TestCase(
-            "HEIF (iPhone)", resource: "iPhone", ext: "HEIC", reader: HeifReader.self,
+            "HEIF (iPhone)", resource: "Apple_iPhone_16_Pro", ext: "HEIC", reader: HeifReader.self,
             maxReadCount: 5, maxBytes: 100 * 1024),
         TestCase(
-            "HEIF (Canon HIF)", resource: "Canon", ext: "hif", reader: HeifReader.self,
+            "HEIF (Canon HIF)", resource: "Canon_EOS-1D_X_Mark_III", ext: "HIF", reader: HeifReader.self,
             width: 5472, height: 3648, minThumbnails: 2,
             maxReadCount: 5, maxBytes: 100 * 1024),
         TestCase(
-            "JPEG", resource: "iPhone5", ext: "JPG", reader: JpegReader.self,
+            "JPEG", resource: "Apple_iPhone_5_2", ext: "JPG", reader: JpegReader.self,
             maxReadCount: 3, maxBytes: 50 * 1024),
         TestCase(
-            "ARW", resource: "DSC04618", ext: "ARW", reader: ArwReader.self,
+            "ARW", resource: "Sony_ILCE-7CM2", ext: "ARW", reader: ArwReader.self,
             maxReadCount: 10, maxBytes: 5 * 1024 * 1024),
         TestCase(
-            "DNG", resource: "IMG_5885", ext: "DNG", reader: DngReader.self,
+            "DNG", resource: "Apple_iPhone_16_Pro", ext: "DNG", reader: DngReader.self,
             maxReadCount: 10, maxBytes: 10 * 1024 * 1024),
         TestCase(
-            "NEF (Nikon Z5 II)", resource: "Nikon_Z5_2", ext: "NEF", reader: NefReader.self,
+            "NEF (Nikon Z5 II)", resource: "NIKON_Z5_2", ext: "NEF", reader: NefReader.self,
             minThumbnails: 2,
             maxReadCount: 15, maxBytes: 10 * 1024 * 1024),
         TestCase(
-            "NEF (Nikon Z5)", resource: "Nikon_Z5", ext: "NEF", reader: NefReader.self,
+            "NEF (Nikon Z5)", resource: "NIKON_Z_5", ext: "NEF", reader: NefReader.self,
             minThumbnails: 2,
             maxReadCount: 15, maxBytes: 10 * 1024 * 1024),
     ]
@@ -69,7 +69,7 @@ final class ImageReaderTests: XCTestCase {
     func testImageReaders() async throws {
         var testedCount = 0
         for tc in Self.testCases {
-            guard let url = Bundle.module.url(forResource: tc.resource, withExtension: tc.ext)
+            guard let url = Bundle.module.url(forResource: tc.resource, withExtension: tc.ext, subdirectory: "Resources")
             else {
                 print("SKIP \(tc.name): \(tc.resource).\(tc.ext) not found")
                 continue
@@ -131,8 +131,8 @@ final class ImageReaderTests: XCTestCase {
     }
 
     func testMp4Reader() async throws {
-        guard let url = Bundle.module.url(forResource: "Pocket3", withExtension: "MP4") else {
-            throw XCTSkip("Pocket3.MP4 not found")
+        guard let url = Bundle.module.url(forResource: "DJI_Osmo_Pocket_3", withExtension: "MP4", subdirectory: "Resources") else {
+            throw XCTSkip("DJI_Osmo_Pocket_3.MP4 not found")
         }
         let reader = Mp4Reader(readAt: Self.fileReadAt(url))
 
@@ -149,8 +149,8 @@ final class ImageReaderTests: XCTestCase {
     }
 
     func testMp4ReaderH264() async throws {
-        guard let url = Bundle.module.url(forResource: "IMG_0772", withExtension: "MOV") else {
-            throw XCTSkip("IMG_0772.MOV not found")
+        guard let url = Bundle.module.url(forResource: "Apple_iPhone_5", withExtension: "MOV", subdirectory: "Resources") else {
+            throw XCTSkip("Apple_iPhone_5.MOV not found")
         }
         let reader = Mp4Reader(readAt: Self.fileReadAt(url))
 
@@ -174,7 +174,7 @@ final class ImageReaderTests: XCTestCase {
         guard
             let url = Bundle.module.url(
                 forResource: "Canon_EOS_R5", withExtension: "CR3",
-                subdirectory: "Resources/samples")
+                subdirectory: "Resources")
         else {
             throw XCTSkip("Canon_EOS_R5.CR3 not found")
         }
@@ -201,7 +201,7 @@ final class ImageReaderTests: XCTestCase {
     }
 
     func testInvalidIndex() async throws {
-        let url = try XCTUnwrap(Bundle.module.url(forResource: "iPhone", withExtension: "HEIC"))
+        let url = try XCTUnwrap(Bundle.module.url(forResource: "Apple_iPhone_16_Pro", withExtension: "HEIC", subdirectory: "Resources"))
         let reader = HeifReader(readAt: Self.fileReadAt(url))
 
         do {

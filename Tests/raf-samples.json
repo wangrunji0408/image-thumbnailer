@@ -1,0 +1,82 @@
+[
+  {
+    "id": 864,
+    "model": "X-T2",
+    "mode": "14bit 14bit uncompressed (3:2)",
+    "notes": "Uncompressed, Colour chart",
+    "url": "https://raw.pixls.us/getfile.php/864/nice/Fujifilm - X-T2 - 14bit 14bit uncompressed (3:2).RAF",
+    "sha256": "aaa648429eeee8e1bea05fccfeeb2ea54ee7052e23db0ee02f049e5b23cecaef",
+    "license": "CC0",
+    "exif_url": "https://raw.pixls.us/getfile.php/864/exif/20170114_173532_TFW04723.RAF.exif.txt"
+  },
+  {
+    "id": 865,
+    "model": "X-T2",
+    "mode": "14bit 14bit compressed (3:2)",
+    "notes": "Compressed(Lossless) raw, colour chart",
+    "url": "https://raw.pixls.us/getfile.php/865/nice/Fujifilm - X-T2 - 14bit 14bit compressed (3:2).RAF",
+    "sha256": "f756ad5be551a8b3e1b503a8a6f7e8e637fba519c0b0f8c79dd58e94b0287602",
+    "license": "CC0",
+    "exif_url": "https://raw.pixls.us/getfile.php/865/exif/20170114_174341_TFW04727.RAF.exif.txt"
+  },
+  {
+    "id": 2634,
+    "model": "FinePix S5Pro",
+    "mode": "3:2",
+    "notes": "",
+    "url": "https://raw.pixls.us/getfile.php/2634/nice/Fujifilm - FinePix S5Pro - 3:2.RAF",
+    "sha256": "aca2b2ebcf90d248b4f822ed78bfeb73e79f1b64164a87dc2051a96726cdfa0c",
+    "license": "CC0",
+    "exif_url": "https://raw.pixls.us/getfile.php/2634/exif/2018_06150003.RAF.exif.txt"
+  },
+  {
+    "id": 3773,
+    "model": "GFX 100",
+    "mode": "16bit 16bit compressed (4:3)",
+    "notes": "16 bit lossless-compressed. Metz 70MZ-5",
+    "url": "https://raw.pixls.us/getfile.php/3773/nice/Fujifilm - GFX 100 - 16bit 16bit compressed (4:3).RAF",
+    "sha256": "018781e126842596fcf3876b3fb6cd8973dc3936ccc753ee8648618be8889287",
+    "license": "CC0",
+    "exif_url": "https://raw.pixls.us/getfile.php/3773/exif/_DSF3978.RAF.exif.txt"
+  },
+  {
+    "id": 6122,
+    "model": "X-T5",
+    "mode": "14bit 14bit compressed (3:2)",
+    "notes": "LOSSLESS COMPRESSED",
+    "url": "https://raw.pixls.us/getfile.php/6122/nice/Fujifilm - X-T5 - 14bit 14bit compressed (3:2).RAF",
+    "sha256": "b2a067e7fda16338f15c2532caa12b238b2415dc1c75a96a6d24d3445cfd0ae3",
+    "license": "CC0",
+    "exif_url": "https://raw.pixls.us/getfile.php/6122/exif/DSCF0021.RAF.exif.txt"
+  },
+  {
+    "id": 6123,
+    "model": "X-T5",
+    "mode": "14bit 14bit compressed (3:2)",
+    "notes": "COMPRESSED",
+    "url": "https://raw.pixls.us/getfile.php/6123/nice/Fujifilm - X-T5 - 14bit 14bit compressed (3:2).RAF",
+    "sha256": "cddd7ae0c43f9280876e5fdcbdf8878718972ebd3d034d8affc8cfc6752d33dc",
+    "license": "CC0",
+    "exif_url": "https://raw.pixls.us/getfile.php/6123/exif/DSCF0022.RAF.exif.txt"
+  },
+  {
+    "id": 6124,
+    "model": "X-T5",
+    "mode": "14bit 14bit uncompressed (3:2)",
+    "notes": "UNCOMPRESSED",
+    "url": "https://raw.pixls.us/getfile.php/6124/nice/Fujifilm - X-T5 - 14bit 14bit uncompressed (3:2).RAF",
+    "sha256": "8695176eec781eb0baa2d03cfcd4bf9b5884efb49b9455ab88406f14dda437fc",
+    "license": "CC0",
+    "exif_url": "https://raw.pixls.us/getfile.php/6124/exif/DSCF0023.RAF.exif.txt"
+  },
+  {
+    "id": 7271,
+    "model": "X-T5",
+    "mode": "14bit 14bit compressed (16:9)",
+    "notes": "\"SPORTS FINDER MODE\" (raw crop)",
+    "url": "https://raw.pixls.us/getfile.php/7271/nice/Fujifilm - X-T5 - 14bit 14bit compressed (16:9).RAF",
+    "sha256": "b77b0352a02c5a9272f5e4ee0bfb9ba270cf7482a727f5ffb91cf1d41a280e2c",
+    "license": "CC0",
+    "exif_url": "https://raw.pixls.us/getfile.php/7271/exif/DSCF4964_70-300.RAF.exif.txt"
+  }
+]

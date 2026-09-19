@@ -62,6 +62,14 @@ public class JpegReader: ImageReader {
         return metadata
     }
 
+    // Container readers also need the orientation when no EXIF thumbnail is present.
+    func getImageRotation() async throws -> Int {
+        if thumbnailEntries == nil {
+            try await loadMetadata()
+        }
+        return orientationToRotation(imageOrientation ?? 1).0
+    }
+
     private func loadMetadata() async throws {
         // Read JPEG header and find EXIF data
         try await reader.prefetch(at: 0, length: 16384)
@@ -79,9 +87,12 @@ public class JpegReader: ImageReader {
 
         // Find EXIF data and parse thumbnails
         var entries: [ThumbnailEntry] = []
+        var exif: ExifMetadata?
 
         // Try to extract EXIF data - it's optional for JPEG files
         if let (exifOffset, exifLength) = try await extractExifData() {
+            var parser = ExifParser(reader: reader, offset: exifOffset, length: UInt64(exifLength))
+            exif = try await parser.parse()
             var ifdOffset = try await parseTiffHeader(at: exifOffset)
             var ifdIndex = 0
 
@@ -103,6 +114,10 @@ public class JpegReader: ImageReader {
         entries.append(contentsOf: mpfEntries)
 
         thumbnailEntries = entries
+        if let existing = metadata, let exif {
+            metadata = Metadata(width: existing.width, height: existing.height, location: exif.location,
+                                captureTime: exif.captureTime, camera: exif.camera)
+        }
     }
 
     private func extractExifData() async throws -> (UInt64, UInt32)? {
@@ -114,14 +129,16 @@ public class JpegReader: ImageReader {
             guard (marker & 0xFF00) == 0xFF00 else { break }
 
             let markerType = UInt8(marker & 0xFF)
+            if markerType == 0xDA || markerType == 0xD9 { break }
             let segmentLength = try await reader.readUInt16(at: offset + 2)
 
             if markerType == 0xE1 {  // APP1 segment
                 let header = try await reader.readString(at: UInt64(offset + 4), length: 4)
                 if header == "Exif" {
+                    guard segmentLength >= 8 else { throw ImageReaderError.invalidData }
                     logger.debug("Found EXIF data at offset \(offset + 4)")
                     let exifOffset = offset + 10  // offset + 4 (segment header) + 6 (Exif\0\0)
-                    let exifLength = UInt32(segmentLength - 6)  // Skip "Exif\0\0"
+                    let exifLength = UInt32(segmentLength - 8)  // Exclude length field and "Exif\0\0"
                     return (exifOffset, exifLength)
                 }
             }
@@ -314,6 +331,7 @@ public class JpegReader: ImageReader {
             }
 
             let markerType = try await reader.readUInt8(at: offset + 1)
+            if markerType == 0xDA || markerType == 0xD9 { break }
             let segmentLength = try await reader.readUInt16(at: offset + 2, byteOrder: .bigEndian)
 
             if markerType == 0xE2 {  // APP2 segment

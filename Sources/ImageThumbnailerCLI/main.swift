@@ -12,10 +12,10 @@ struct ImageThumbnailCLI: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "ImageThumbnailCLI",
         abstract:
-            "A tool to generate thumbnails from various image formats including HEIF, JPEG, and Sony ARW files."
+            "A tool to extract thumbnails from image and video formats including HEIF, JPEG, and RAW files."
     )
 
-    @Argument(help: "The path to the image file (HEIF, JPEG, ARW, DNG, MP4, or MOV)")
+    @Argument(help: "The path to the image file (HEIF, JPEG, ARW, RAF, DNG, MP4, or MOV)")
     var imagePath: String
 
     @Option(name: .shortAndLong, help: "The length of the thumbnail's short side")
@@ -27,13 +27,16 @@ struct ImageThumbnailCLI: AsyncParsableCommand {
     @Option(name: .shortAndLong, help: "The output path for the thumbnail")
     var outputPath: String?
 
+    @Flag(name: .long, help: "Print metadata as JSON without extracting a thumbnail")
+    var metadataJSON = false
+
     func run() async throws {
         do {
             let fileURL = URL(fileURLWithPath: imagePath)
             let fileHandle = try FileHandle(forReadingFrom: fileURL)
             defer { fileHandle.closeFile() }
 
-            print("extracting thumbnail from \(imagePath)...")
+            if !metadataJSON { print("extracting thumbnail from \(imagePath)...") }
 
             // create read function
             var readCount = 0
@@ -59,6 +62,8 @@ struct ImageThumbnailCLI: AsyncParsableCommand {
                 reader = JpegReader(readAt: readAt)
             case "arw":
                 reader = ArwReader(readAt: readAt)
+            case "raf":
+                reader = RafReader(readAt: readAt)
             case "dng":
                 reader = DngReader(readAt: readAt)
             case "nef":
@@ -77,12 +82,26 @@ struct ImageThumbnailCLI: AsyncParsableCommand {
                 reader = Mp4Reader(readAt: readAt)
             default:
                 logger.error(
-                    "unsupported file format: \(fileExtension). Only HEIF, JPEG, ARW, DNG, MP4, and MOV are supported."
+                    "unsupported file format: \(fileExtension)"
                 )
                 return
             }
 
             let metadata = try await reader.getMetadata()
+            if metadataJSON {
+                let encoder = JSONEncoder()
+                encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+                encoder.dateEncodingStrategy = .iso8601
+                print(String(decoding: try encoder.encode(metadata), as: UTF8.self))
+                return
+            }
+            if let time = metadata.captureTime {
+                print("capture time: \(time.value)\(time.subseconds.map { "." + $0 } ?? "") \(time.utcOffset ?? "(offset unknown)")")
+            }
+            if let camera = metadata.camera {
+                print("camera: \(camera.make ?? "") \(camera.model ?? "")")
+                if let lens = camera.lensModel { print("lens: \(lens)") }
+            }
             print("metadata:")
             print("  size: \(metadata.width)x\(metadata.height)")
             if let duration = metadata.duration {

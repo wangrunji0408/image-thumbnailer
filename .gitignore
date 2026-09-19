@@ -1,4 +1,7 @@
 .build
 build
 .swiftpm
-Tests/ImageThumbnailerTests/Resources
+Tests/ImageThumbnailerTests/Resources/*
+!Tests/ImageThumbnailerTests/Resources/Canon_EOS-1D_X_Mark_III.HIF
+!Tests/ImageThumbnailerTests/Resources/Sony_ILCE-7CM2.HIF
+!Tests/ImageThumbnailerTests/Resources/Apple_iPhone_16_Pro.HEIC

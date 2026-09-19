@@ -16,7 +16,7 @@ public struct ThumbnailInfo {
     public let rotation: Int?
 }
 
-public struct GPSLocation: Sendable {
+public struct GPSLocation: Sendable, Codable {
     public let latitude: Float
     public let longitude: Float
     public let altitude: Float
@@ -28,19 +28,27 @@ public struct GPSLocation: Sendable {
     }
 }
 
-public struct Metadata: Sendable {
+public struct Metadata: Sendable, Codable {
     public let width: UInt32
     public let height: UInt32
     public let duration: Float?  // Duration in seconds
     public let location: GPSLocation?
+    public let captureTime: CaptureTime?
+    public let camera: CameraMetadata?
+    /// QuickTime container creation timestamp (1904 epoch), not necessarily capture time.
+    public let creationTime: Date?
 
     public init(
-        width: UInt32, height: UInt32, duration: Float? = nil, location: GPSLocation? = nil
+        width: UInt32, height: UInt32, duration: Float? = nil, location: GPSLocation? = nil,
+        captureTime: CaptureTime? = nil, camera: CameraMetadata? = nil, creationTime: Date? = nil
     ) {
         self.width = width
         self.height = height
         self.duration = duration
         self.location = location
+        self.captureTime = captureTime
+        self.camera = camera
+        self.creationTime = creationTime
     }
 }
 

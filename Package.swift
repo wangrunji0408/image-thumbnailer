@@ -35,7 +35,7 @@ let package = Package(
         .testTarget(
             name: "ImageThumbnailerTests",
             dependencies: ["ImageThumbnailer"],
-            resources: [.copy("Resources")]
+            resources: [.copy("Resources"), .copy("ResourceManifest.json")]
         ),
     ]
 )

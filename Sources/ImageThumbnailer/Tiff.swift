@@ -151,7 +151,22 @@ public class TiffReader: ImageReader {
         }
 
         thumbnailEntries = entries
-        metadata = Metadata(width: mainImageWidth, height: mainImageHeight)
+        var parser = ExifParser(reader: reader, offset: 0)
+        let exif = try await parser.parse()
+        var preview: Metadata?
+        if try await reader.readUInt16(at: 2) == 0x55,
+           let entry = entries.first(where: { $0.format == "jpeg" }) {
+            let source = reader
+            let jpeg = JpegReader { offset, length in
+                guard offset < UInt64(entry.length) else { throw ImageReaderError.invalidData }
+                return try await source.read(at: UInt64(entry.offset) + offset,
+                    length: min(length, UInt32(UInt64(entry.length) - offset)))
+            }
+            preview = try await jpeg.getMetadata()
+        }
+        metadata = Metadata(width: mainImageWidth, height: mainImageHeight, location: exif.location ?? preview?.location,
+                            captureTime: exif.captureTime ?? preview?.captureTime,
+                            camera: exif.camera.fillingMissing(from: preview?.camera ?? CameraMetadata()))
     }
 
     private func parseIFDForDataAndDimensions(

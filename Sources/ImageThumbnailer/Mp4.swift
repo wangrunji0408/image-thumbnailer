@@ -6,6 +6,8 @@ private let logger = Logger(subsystem: "com.wangrunji.ImageThumbnailer", categor
 // MARK: - Mp4Reader Implementation
 
 public class Mp4Reader: ImageReader {
+    private var cameraMetadata = CameraMetadata()
+    private var captureTime: CaptureTime?
     private let reader: Reader
     private var imageInfos: [Mp4ImageInfo]?
     private var metadata: Metadata?
@@ -101,6 +103,9 @@ public class Mp4Reader: ImageReader {
                 videoTrackInfo: videoTrackInfo)
             {
                 finalThumbnails = [firstFrameInfo]
+                if videoTrackInfo.codecType == "jpeg" {
+                    try await parseEmbeddedJPEG(at: firstFrameInfo.frameOffset, length: firstFrameInfo.frameSize)
+                }
                 logger.info("Successfully prepared first frame extraction info")
             }
         }
@@ -111,7 +116,9 @@ public class Mp4Reader: ImageReader {
                 width: trackDimensions.width,
                 height: trackDimensions.height,
                 duration: parsedInfo.duration,
-                location: parsedInfo.gpsLocation
+                location: parsedInfo.gpsLocation,
+                captureTime: captureTime, camera: cameraMetadata == CameraMetadata() ? nil : cameraMetadata,
+                creationTime: parsedInfo.creationTime
             )
         } else {
             throw ImageReaderError.invalidData
@@ -122,6 +129,7 @@ public class Mp4Reader: ImageReader {
     private struct ParsedMoovInfo {
         let trackDimensions: (width: UInt32, height: UInt32)?
         let duration: Float?
+        let creationTime: Date?
         let videoTrackInfo: VideoTrackInfo?
         let gpsLocation: GPSLocation?
     }
@@ -136,7 +144,7 @@ public class Mp4Reader: ImageReader {
         let moovEndOffset = moovOffset + UInt64(moovSize)
 
         // Parse duration from mvhd box
-        let duration = try await parseDuration(moovOffset: moovOffset, moovEndOffset: moovEndOffset)
+        let movieHeader = try await parseMovieHeader(moovOffset: moovOffset, moovEndOffset: moovEndOffset)
 
         // Find first video track for first frame extraction
         var offset: UInt64 = moovOffset
@@ -163,6 +171,7 @@ public class Mp4Reader: ImageReader {
                     // Use first video track for dimensions and first frame extraction
                     if trackInfo.isVideo && videoTrackInfo == nil {
                         trackDimensions = (trackInfo.width, trackInfo.height)
+                        try await parseTrackMetadata(start: trakOffset, end: trakEndOffset)
 
                         // Create video track info for first frame extraction
                         // For JPEG codec, hevcConfig is not required
@@ -201,10 +210,34 @@ public class Mp4Reader: ImageReader {
 
         return ParsedMoovInfo(
             trackDimensions: trackDimensions,
-            duration: duration,
+            duration: movieHeader.duration,
+            creationTime: movieHeader.creationTime,
             videoTrackInfo: videoTrackInfo,
             gpsLocation: gpsLocation
         )
+    }
+
+    private func parseEmbeddedJPEG(at offset: UInt64, length: UInt32) async throws {
+        let source = reader
+        let jpeg = JpegReader { relative, requested in
+            guard relative < UInt64(length) else { throw ImageReaderError.invalidData }
+            return try await source.read(at: offset + relative, length: min(requested, UInt32(UInt64(length) - relative)))
+        }
+        let metadata = try await jpeg.getMetadata()
+        if let camera = metadata.camera { cameraMetadata = camera }
+        if let time = metadata.captureTime { captureTime = time }
+    }
+
+    private func parseTrackMetadata(start: UInt64, end: UInt64) async throws {
+        var offset = start
+        while offset + 8 <= end {
+            let size = UInt64(try await reader.readUInt32(at: offset))
+            guard size >= 8, size <= end - offset else { break }
+            if try await reader.readString(at: offset + 4, length: 4) == "meta" {
+                _ = try await parseMetaBox(metaOffset: offset + 8, metaEndOffset: offset + size)
+            }
+            offset += size
+        }
     }
 
     // Comprehensive track information structure
@@ -352,29 +385,26 @@ public class Mp4Reader: ImageReader {
         return roundedAngle
     }
 
-    /// Parse video duration from mvhd box in moov
-    private func parseDuration(moovOffset: UInt64, moovEndOffset: UInt64) async throws -> Float? {
-        // Look for mvhd box
-        guard
-            let mvhdBox = try await findBox(
-                offset: moovOffset, length: UInt32(moovEndOffset - moovOffset), boxType: "mvhd")
-        else {
-            return nil
+    /// QuickTime timestamps use the 1904 epoch; zero means unspecified.
+    private func parseMovieHeader(moovOffset: UInt64, moovEndOffset: UInt64) async throws
+        -> (duration: Float?, creationTime: Date?)
+    {
+        guard let box = try await findBox(offset: moovOffset,
+            length: UInt32(moovEndOffset - moovOffset), boxType: "mvhd"), box.size >= 20 else {
+            return (nil, nil)
         }
-
-        // mvhd box structure:
-        // version(1) + flags(3) + creation_time(4) + modification_time(4) +
-        // timescale(4) + duration(4) + ...
-        guard mvhdBox.size >= 20 else { return nil }
-
-        // Get timescale (sample rate)
-        let timescale = try await reader.readUInt32(at: mvhdBox.offset + 12)
-
-        // Get duration in timescale units
-        let durationInTimescale = try await reader.readUInt32(at: mvhdBox.offset + 16)
-
-        // Convert to seconds
-        return Float(durationInTimescale) / Float(timescale)
+        let version = try await reader.readUInt8(at: box.offset)
+        guard version <= 1, box.size >= (version == 1 ? 32 : 20) else { return (nil, nil) }
+        let creation = version == 1
+            ? try await reader.readUInt64(at: box.offset + 4)
+            : UInt64(try await reader.readUInt32(at: box.offset + 4))
+        let scale = try await reader.readUInt32(at: box.offset + (version == 1 ? 20 : 12))
+        let ticks = version == 1
+            ? try await reader.readUInt64(at: box.offset + 24)
+            : UInt64(try await reader.readUInt32(at: box.offset + 16))
+        let date = creation > 0 && creation < 100_000_000_000
+            ? Date(timeIntervalSince1970: Double(creation) - 2_082_844_800) : nil
+        return (scale > 0 ? Float(ticks) / Float(scale) : nil, date)
     }
 
     /// Prepare first frame info without reading actual data
@@ -865,6 +895,21 @@ extension Mp4Reader {
                 continue
             }
 
+            if boxType == "meta" {
+                if let location = try await parseMetaBox(metaOffset: offset + 8, metaEndOffset: offset + UInt64(boxSize)) {
+                    return location
+                }
+            }
+
+            // Canon MOV embeds a JPEG with standard EXIF in udta/CNTH/CNDA.
+            if boxType == "CNTH", boxSize >= 20 {
+                let childSize = try await reader.readUInt32(at: offset + 8)
+                let childType = try await reader.readString(at: offset + 12, length: 4)
+                if childType == "CNDA", childSize > 8, childSize <= boxSize - 8 {
+                    try await parseEmbeddedJPEG(at: offset + 16, length: childSize - 8)
+                }
+            }
+
             // Look for ©xyz box which contains GPS coordinates in ISO 6709 format
             if boxType == "©xyz" || boxType == "\u{00A9}xyz" {
                 logger.debug("Found ©xyz box at offset \(offset), size: \(boxSize)")
@@ -965,7 +1010,7 @@ extension Mp4Reader {
         }
 
         var keysData: [(index: UInt32, namespace: String, key: String)] = []
-        var ilstData: [(index: UInt32, value: Data)] = []
+        var ilstRange: (start: UInt64, end: UInt64)?
 
         // First pass: find keys and ilst boxes
         while offset + 8 <= metaEndOffset {
@@ -985,30 +1030,59 @@ extension Mp4Reader {
             } else if boxType == "ilst" {
                 logger.info("Found ilst box")
                 // Parse ilst box
-                ilstData = try await parseIlstBox(
-                    ilstOffset: offset + 8, ilstEndOffset: offset + UInt64(boxSize))
-                logger.info("Found \(ilstData.count) metadata items")
+                ilstRange = (offset + 8, offset + UInt64(boxSize))
             }
 
             offset += UInt64(boxSize)
         }
 
-        // Match keys with values to find GPS coordinates
+        let selected: Set<String> = ["com.apple.quicktime.location.ISO6709", "com.apple.quicktime.make",
+            "com.apple.quicktime.model", "com.apple.quicktime.software", "com.apple.quicktime.author",
+            "com.apple.quicktime.copyright", "com.apple.quicktime.creationdate",
+            "com.apple.quicktime.camera.lens_model", "com.apple.quicktime.camera.focal_length.35mm_equivalent"]
+        let wanted = Set(keysData.filter { selected.contains($0.key) }.map { $0.index })
+        var ilstData: [(index: UInt32, value: Data)] = []
+        if let range = ilstRange, !wanted.isEmpty {
+            ilstData = try await parseIlstBox(ilstOffset: range.start, ilstEndOffset: range.end, wanted: wanted)
+        }
+        var location: GPSLocation?
         for key in keysData {
-            if key.key == "com.apple.quicktime.location.ISO6709" {
-                // Find corresponding value in ilst
-                if let item = ilstData.first(where: { $0.index == key.index }) {
-                    if let gpsString = String(data: item.value, encoding: .utf8)?
-                        .trimmingCharacters(in: .whitespaces.union(.controlCharacters))
-                    {
-                        logger.debug("Found GPS string from keys: \(gpsString)")
-                        return parseISO6709(gpsString)
-                    }
-                }
+            guard let item = ilstData.first(where: { $0.index == key.index }) else { continue }
+            if key.key == "com.apple.quicktime.camera.focal_length.35mm_equivalent", item.value.count == 4 {
+                let n = item.value.reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
+                if n > 0, n < 100_000 { cameraMetadata.focalLengthIn35mm = n }
+                continue
+            }
+            guard let value = String(data: item.value, encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines.union(.controlCharacters)),
+                  !value.isEmpty else { continue }
+            switch key.key {
+            case "com.apple.quicktime.location.ISO6709": location = parseISO6709(value)
+            case "com.apple.quicktime.make": cameraMetadata.make = value
+            case "com.apple.quicktime.model": cameraMetadata.model = value
+            case "com.apple.quicktime.software": cameraMetadata.software = value
+            case "com.apple.quicktime.camera.lens_model": cameraMetadata.lensModel = value
+            case "com.apple.quicktime.author": cameraMetadata.artist = value
+            case "com.apple.quicktime.copyright": cameraMetadata.copyright = value
+            case "com.apple.quicktime.creationdate": captureTime = quickTimeCaptureTime(value)
+            default: break
             }
         }
+        return location
+    }
 
-        return nil
+    private func quickTimeCaptureTime(_ value: String) -> CaptureTime? {
+        // Retain the camera's wall-clock time and offset instead of normalizing to the host zone.
+        let pattern = #"^(\d{4})[-:](\d{2})[-:](\d{2})[T ](\d{2}:\d{2}:\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:?\d{2})?$"#
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)) else { return nil }
+        func group(_ n: Int) -> String? {
+            Range(match.range(at: n), in: value).map { String(value[$0]) }
+        }
+        guard let year = group(1), let month = group(2), let day = group(3), let clock = group(4) else { return nil }
+        var offset = group(6)
+        if let text = offset, text.count == 5 { offset = String(text.prefix(3)) + ":" + text.suffix(2) }
+        return CaptureTime(value: "\(year):\(month):\(day) \(clock)", subseconds: group(5), utcOffset: offset)
     }
 
     private func parseKeysBox(keysOffset: UInt64, keysSize: UInt32) async throws -> [(
@@ -1050,7 +1124,7 @@ extension Mp4Reader {
         return keys
     }
 
-    private func parseIlstBox(ilstOffset: UInt64, ilstEndOffset: UInt64) async throws -> [(
+    private func parseIlstBox(ilstOffset: UInt64, ilstEndOffset: UInt64, wanted: Set<UInt32>) async throws -> [(
         index: UInt32, value: Data
     )] {
         var items: [(UInt32, Data)] = []
@@ -1066,6 +1140,7 @@ extension Mp4Reader {
 
             // The box type is actually the index number
             let index = try await reader.readUInt32(at: offset + 4)
+            guard wanted.contains(index) else { offset += UInt64(boxSize); continue }
 
             // Inside each item is a 'data' box
             var itemOffset = offset + 8
@@ -1083,7 +1158,7 @@ extension Mp4Reader {
                 if dataBoxType == "data" {
                     // data box: size (4) + type (4) + type_indicator (4) + locale (4) + value
                     let valueSize = dataBoxSize - 16
-                    if valueSize > 0 {
+                    if valueSize > 0, valueSize <= 4096 {
                         let value = try await reader.read(at: itemOffset + 16, length: valueSize)
                         items.append((index, value))
                     }

@@ -70,18 +70,20 @@ public class HeifReader: ImageReader {
 
         thumbnailInfos = thumbnails
 
-        // Extract GPS location from EXIF if available
-        var gpsLocation: GPSLocation? = nil
-        if let exifInfo = exifLocationInfo {
-            do {
-                gpsLocation = try await parseExifForGPS(exifOffset: UInt64(exifInfo.offset))
-            } catch {
-                logger.error("Failed to parse EXIF GPS data: \(error)")
+        var exif: ExifMetadata?
+        if let info = exifLocationInfo, info.length >= 4 {
+            let header = try await reader.readUInt32(at: UInt64(info.offset), byteOrder: .bigEndian)
+            let skip = UInt64(header) + 4
+            if skip < UInt64(info.length) {
+                var parser = ExifParser(reader: reader, offset: UInt64(info.offset) + skip,
+                                        length: UInt64(info.length) - skip)
+                exif = try await parser.parse()
             }
         }
 
         if let width = primaryMetadata.width, let height = primaryMetadata.height {
-            metadata = Metadata(width: width, height: height, location: gpsLocation)
+            metadata = Metadata(width: width, height: height, location: exif?.location,
+                                captureTime: exif?.captureTime, camera: exif?.camera)
         } else {
             throw ImageReaderError.invalidData
         }
@@ -177,57 +179,6 @@ public class HeifReader: ImageReader {
         }
 
         return (thumbnails, (width, height), exifLocationInfo)
-    }
-
-    // MARK: - EXIF Parsing
-
-    private func parseExifForGPS(exifOffset: UInt64) async throws -> GPSLocation? {
-        // HEIF EXIF data starts with a 4-byte offset header
-        let offsetHeader = try await reader.readUInt32(at: exifOffset)
-        let tiffOffset = exifOffset + 4 + UInt64(offsetHeader)
-
-        // Parse TIFF header to determine byte order
-        let byteOrderMark = try await reader.readString(at: tiffOffset, length: 2)
-        if byteOrderMark == "II" {  // little endian
-            reader.setByteOrder(.littleEndian)
-        } else if byteOrderMark == "MM" {  // big endian
-            reader.setByteOrder(.bigEndian)
-        } else {
-            return nil
-        }
-
-        // Read IFD offset
-        let ifd0Offset = try await reader.readUInt32(at: tiffOffset + 4)
-
-        // Find GPS IFD in IFD0
-        if let gpsIFDOffset = try await findGPSIFDInIFD(
-            ifdOffset: tiffOffset + UInt64(ifd0Offset))
-        {
-            // Parse GPS IFD
-            return try await parseGPSIFD(
-                reader: reader,
-                exifOffset: tiffOffset,
-                gpsIFDOffset: UInt64(gpsIFDOffset)
-            )
-        }
-
-        return nil
-    }
-
-    private func findGPSIFDInIFD(ifdOffset: UInt64) async throws -> UInt32? {
-        let entryCount = try await reader.readUInt16(at: ifdOffset)
-
-        for i in 0..<Int(entryCount) {
-            let entryOffset = ifdOffset + 2 + UInt64(i) * 12
-            let tag = try await reader.readUInt16(at: entryOffset)
-
-            if tag == 0x8825 {  // GPS IFD tag
-                let gpsIFDOffset = try await reader.readUInt32(at: entryOffset + 8)
-                return gpsIFDOffset
-            }
-        }
-
-        return nil
     }
 
     // MARK: - Box Parsing Utilities
@@ -704,7 +655,7 @@ public class HeifReader: ImageReader {
         // Verify HEIC brand
         if ftypSize >= 12 {
             let brand = try await reader.readString(at: offset + 8, length: 4)
-            guard brand.hasPrefix("hei") else {
+            guard ["heic", "heix", "hevc", "hevx", "heim", "heis", "hevm", "hevs", "mif1"].contains(brand) else {
                 logger.error("Not a HEIC file, brand: \(brand)")
                 return nil
             }
@@ -713,30 +664,22 @@ public class HeifReader: ImageReader {
 
         offset = UInt64(ftypSize)
 
-        // Search for meta box with optimized reading
-        while offset + 8 < 65536 {  // Limit search to reasonable file header size
-            // Ensure we have enough data in buffer
-            if offset + 8 > data.count {
-                try await reader.prefetch(at: offset, length: 8192)
+        // Some encoders put meta after mdat. Jump over payloads instead of scanning
+        // a fixed prefix, and support the extended-size mdat used by large files.
+        for _ in 0..<128 {
+            let shortSize = try await reader.readUInt32(at: offset, byteOrder: .bigEndian)
+            let type = try await reader.readString(at: offset + 4, length: 4)
+            let size = shortSize == 1
+                ? try await reader.readUInt64(at: offset + 8, byteOrder: .bigEndian)
+                : UInt64(shortSize)
+            let header: UInt64 = shortSize == 1 ? 16 : 8
+            guard size >= header, offset <= UInt64.max - size else { return nil }
+            if type == "meta" {
+                guard header == 8, size >= 12, size <= 16 * 1024 * 1024 else { return nil }
+                try await reader.prefetch(at: offset, length: UInt32(size))
+                return (offset, UInt32(size))
             }
-
-            guard let (boxSize, boxType) = try await parseBoxHeader(offset: offset) else {
-                break
-            }
-
-            if boxType == "meta" {
-                logger.debug("Found meta box: offset=\(offset), size=\(boxSize)")
-
-                // Prefetch the entire meta box for efficient parsing
-                try await reader.prefetch(at: offset, length: boxSize)
-                return (offset, boxSize)
-            }
-
-            if boxSize <= 8 {
-                offset += 8
-            } else {
-                offset += UInt64(boxSize)
-            }
+            offset += size
         }
 
         return nil
