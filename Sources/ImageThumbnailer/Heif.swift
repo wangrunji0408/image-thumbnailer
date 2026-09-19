@@ -39,7 +39,7 @@ public class HeifReader: ImageReader {
             try await loadMetadata()
         }
 
-        guard let infos = thumbnailInfos, index < infos.count else {
+        guard let infos = thumbnailInfos, infos.indices.contains(index) else {
             throw ImageReaderError.indexOutOfBounds
         }
 

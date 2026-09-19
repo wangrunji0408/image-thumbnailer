@@ -43,9 +43,9 @@ struct ImageThumbnailCLI: AsyncParsableCommand {
             var readBytes = 0
             let readAt: (UInt64, UInt32) async throws -> Data = { offset, length in
                 readCount += 1
-                readBytes += Int(length)
                 try fileHandle.seek(toOffset: offset)
-                let data = fileHandle.readData(ofLength: Int(length))
+                let data = try fileHandle.read(upToCount: Int(length)) ?? Data()
+                readBytes += data.count
                 logger.debug(
                     "read data: offset=\(offset), length=\(length), data=\(data.count) bytes")
                 return data
@@ -54,38 +54,7 @@ struct ImageThumbnailCLI: AsyncParsableCommand {
             // Determine file type and extract thumbnail accordingly
             let fileExtension = fileURL.pathExtension.lowercased()
 
-            let reader: ImageReader
-            switch fileExtension {
-            case "heic", "heif", "hif":
-                reader = HeifReader(readAt: readAt)
-            case "jpg", "jpeg":
-                reader = JpegReader(readAt: readAt)
-            case "arw":
-                reader = ArwReader(readAt: readAt)
-            case "raf":
-                reader = RafReader(readAt: readAt)
-            case "dng":
-                reader = DngReader(readAt: readAt)
-            case "nef":
-                reader = NefReader(readAt: readAt)
-            case "pef":
-                reader = PefReader(readAt: readAt)
-            case "orf":
-                reader = OrfReader(readAt: readAt)
-            case "rw2":
-                reader = Rw2Reader(readAt: readAt)
-            case "cr2":
-                reader = Cr2Reader(readAt: readAt)
-            case "cr3":
-                reader = Cr3Reader(readAt: readAt)
-            case "mp4", "mov":
-                reader = Mp4Reader(readAt: readAt)
-            default:
-                logger.error(
-                    "unsupported file format: \(fileExtension)"
-                )
-                return
-            }
+            let reader = try ImageReaderFactory.makeReader(forExtension: fileExtension, readAt: readAt)
 
             let metadata = try await reader.getMetadata()
             if metadataJSON {

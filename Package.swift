@@ -8,6 +8,7 @@ let package = Package(
         .iOS(.v14),
     ],
     products: [
+        .executable(name: "ImageThumbnailerBenchmark", targets: ["ImageThumbnailerBenchmark"]),
         .library(
             name: "ImageThumbnailer",
             targets: ["ImageThumbnailer"]
@@ -31,6 +32,10 @@ let package = Package(
                 "ImageThumbnailer",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ]
+        ),
+        .executableTarget(
+            name: "ImageThumbnailerBenchmark",
+            dependencies: ["ImageThumbnailer", .product(name: "ArgumentParser", package: "swift-argument-parser")]
         ),
         .testTarget(
             name: "ImageThumbnailerTests",

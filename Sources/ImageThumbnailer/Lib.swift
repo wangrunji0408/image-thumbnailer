@@ -7,7 +7,7 @@ public protocol ImageReader {
     func getMetadata() async throws -> Metadata
 }
 
-public struct ThumbnailInfo {
+public struct ThumbnailInfo: Sendable, Codable {
     public let size: UInt32
     public let format: String
     public let width: UInt32?

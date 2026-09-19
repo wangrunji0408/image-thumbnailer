@@ -57,7 +57,7 @@ public class TiffReader: ImageReader {
             try await loadMetadata()
         }
 
-        guard let entries = thumbnailEntries, index < entries.count else {
+        guard let entries = thumbnailEntries, entries.indices.contains(index) else {
             throw ImageReaderError.indexOutOfBounds
         }
 
@@ -176,7 +176,6 @@ public class TiffReader: ImageReader {
         mainHeight: inout UInt32,
         ifdIndex: Int
     ) async throws -> UInt32 {
-        try await reader.prefetch(at: UInt64(ifdOffset), length: 256)
         let entryCount = try await reader.readUInt16(at: UInt64(ifdOffset))
 
         var thumbnailOffset: UInt32?
@@ -392,7 +391,6 @@ public class TiffReader: ImageReader {
     }
 
     private func parseSubIFD(subIfdOffset: UInt64) async throws -> SubIFDResult {
-        try await reader.prefetch(at: subIfdOffset, length: 1024)
         let entryCount = try await reader.readUInt16(at: subIfdOffset)
 
         var result = SubIFDResult()

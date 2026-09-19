@@ -1,162 +1,91 @@
 # ImageThumbnailer
 
-A fast and efficient Swift library for extracting embedded thumbnails from various image and video formats. Designed for minimal I/O - reads only the metadata and thumbnail data, not the full file.
+Swift library and macOS CLI for extracting embedded image thumbnails, video previews and
+metadata with minimal I/O. Reads through an asynchronous `readAt(offset, length)` callback;
+no full RAW decoding. Requires Swift 5.9+, macOS 11+ or iOS 14+ (library).
 
-## Supported Formats
+## Supported files
 
-| Format | Extension | Metadata | Thumbnails | Notes |
-|--------|-----------|----------|------------|-------|
-| HEIF/HEIC | .heic, .heif, .hif | Yes | Yes | iPhone, Canon HIF, etc. |
-| JPEG | .jpg, .jpeg | Yes | Yes | EXIF + MPF multi-frame |
-| Fujifilm RAF | .raf | Yes | Yes | Embedded JPEG preview + EXIF thumbnail; compressed and uncompressed |
-| Sony ARW | .arw | Yes | Yes | Multiple thumbnails |
-| Adobe DNG | .dng | Yes | Yes | Including Apple ProRAW |
-| Nikon NEF | .nef | Yes | Yes | Lossless & efficient compression |
-| Pentax PEF | .pef | Yes | Yes | Standard TIFF-based |
-| Panasonic RW2 | .rw2 | Yes | Yes | Via JpgFromRaw tag |
-| Canon CR2 | .cr2 | Yes | Yes | Standard TIFF-based |
-| Canon CR3 | .cr3 | Yes | Yes | ISOBMFF container, JPEG from tracks |
-| Olympus ORF | .orf | Yes | No | Metadata only; thumbnails in MakerNotes |
-| MP4/MOV | .mp4, .mov | Yes | Yes | HEVC, H.264; first frame extraction |
+HEIC/HEIF/HIF, JPEG, RAF, ARW, DNG, NEF, PEF, RW2, CR2, CR3, ORF and MP4/MOV
+(HEVC/H.264). ORF currently provides metadata only. A supported extension does not guarantee
+that every vendor variant has an extractable preview.
 
-### Not Yet Supported
+Metadata includes dimensions, GPS, duration, EXIF capture time and camera/lens/exposure
+fields where present. Unknown capture time zones stay unknown; QuickTime `creationTime`
+is a separate container timestamp. Vendor MakerNotes are not interpreted.
 
-| Format | Extension | Notes |
-|--------|-----------|-------|
-| Sigma X3F | .x3f | Proprietary format |
+## Use
 
-## Installation
-
-### Swift Package Manager
+Add this repository as a Swift Package dependency and import `ImageThumbnailer`:
 
 ```swift
-dependencies: [
-    .package(url: "https://github.com/wangrunji0408/image-thumbnailer", from: "1.0.0")
-]
-```
-
-## Usage
-
-### Library Usage
-
-```swift
-import ImageThumbnailer
-
-// Create a read function for your image file
-let readAt: (UInt64, UInt32) async throws -> Data = { offset, length in
-    let fileHandle = try FileHandle(forReadingFrom: url)
-    defer { fileHandle.closeFile() }
-    try fileHandle.seek(toOffset: offset)
-    return fileHandle.readData(ofLength: Int(length))
+let handle = try FileHandle(forReadingFrom: url)
+defer { try? handle.close() }
+let reader = try ImageReaderFactory.makeReader(forExtension: url.pathExtension) { offset, length in
+    try handle.seek(toOffset: offset)
+    return try handle.read(upToCount: Int(length)) ?? Data()
 }
-
-// Use the appropriate reader for your format
-let reader = HeifReader(readAt: readAt)  // or JpegReader, ArwReader, NefReader, etc.
-
 let metadata = try await reader.getMetadata()
-print("Image: \(metadata.width)x\(metadata.height)")
-
-let thumbnails = try await reader.getThumbnailList()
-for (i, info) in thumbnails.enumerated() {
-    print("[\(i)] \(info.format) \(info.width ?? 0)x\(info.height ?? 0) (\(info.size) bytes)")
+for (index, info) in try await reader.getThumbnailList().enumerated() {
+    let data = try await reader.getThumbnail(at: index)
+    // Save data using info.format; honor info.rotation when displaying it.
 }
-
-let thumbnailData = try await reader.getThumbnail(at: 0)
 ```
 
-### Command Line Usage
+Readers cache data from an immutable source; use one reader per file and serialize calls.
+Individual readers (`HeifReader`, `RafReader`, etc.) remain available directly.
 
 ```bash
-# Extract thumbnail from various image formats
-swift run ImageThumbnailerCLI input.heic
-swift run ImageThumbnailerCLI input.nef
-swift run ImageThumbnailerCLI input.arw
-swift run ImageThumbnailerCLI input.raf
-
-# Extract with minimum 300px short side
-swift run ImageThumbnailerCLI input.heic -s 300
-
-# Specify output path
-swift run ImageThumbnailerCLI input.dng -o thumbnail.jpg
+swift run ImageThumbnailerCLI photo.raf -o preview.jpg
+swift run ImageThumbnailerCLI photo.heic -t 0 -o preview.heic
+swift run ImageThumbnailerCLI photo.raf --metadata-json
 ```
 
-## Metadata
-
-Every reader returns optional `captureTime` and `camera` fields in addition to dimensions,
-GPS and duration. `CameraMetadata` includes make/model, lens make/model, software,
-orientation, exposure time (seconds), f-number, ISO, exposure compensation (EV), focal
-length (mm), 35mm equivalent focal length, exposure program, metering, flash, white balance,
-artist and copyright. Enumerated camera settings retain their standard EXIF numeric codes.
-Vendor MakerNotes, such as Fujifilm film simulation or GoPro telemetry, are not interpreted.
-
-```swift
-let metadata = try await reader.getMetadata()
-print(metadata.captureTime?.value as Any)       // yyyy:MM:dd HH:mm:ss
-print(metadata.captureTime?.subseconds as Any)  // Preserves leading zeros
-print(metadata.captureTime?.utcOffset as Any)   // Optional, e.g. +08:00
-print(metadata.captureTime?.date as Any)        // nil when the offset is unknown
-print(metadata.camera?.model as Any)
-print(metadata.camera?.exposureTime as Any)
-```
-
-Capture time uses EXIF DateTimeOriginal, falling back to DateTimeDigitized with its matching
-offset/subseconds. MOV/MP4 readers support QuickTime creation-date and camera keys, including
-track-level lens information and EXIF in Canon/JPEG video previews. `creationTime` separately
-reports the QuickTime movie-header timestamp using the specified 1904 epoch; camera clocks
-may be incorrectly configured, and a container timestamp is not labelled as capture time.
-Missing/empty fields and undefined rational values remain nil.
+## Directory benchmark
 
 ```bash
-swift run ImageThumbnailerCLI input.raf --metadata-json
+swift run ImageThumbnailerBenchmark /path/to/media -o build/before
+# After changing the library, run the same input again into a new directory:
+swift run ImageThumbnailerBenchmark /path/to/media -o build/after
+python3 Tests/compare_benchmarks.py build/before/report.json build/after/report.json
 ```
 
-## Local resource library
+The tool recursively scans regular files using case-insensitive supported extensions and
+extracts **every thumbnail size exposed by the reader**, including full embedded previews.
+It does not resize images, demosaic RAW data, or copy the original as a thumbnail fallback.
+Symlinks are skipped. Output must be a new/empty directory outside the input tree.
 
-The 35 local photos/videos live directly in `Tests/ImageThumbnailerTests/Resources/`, named
-by device model with numeric suffixes for duplicates. `Unknown_Device` / `GoPro_Unknown`
-identify files without enough metadata to establish a model. `ResourceManifest.json` next
-to the tests records original paths, new filenames, SHA-256 hashes, source URLs where known,
-and group-qualified ExifTool baselines (avoiding collisions with vendor MakerNote tags).
+- `files/<relative source filename>/metadata.json`: metadata, thumbnail descriptors, errors,
+  per-stage performance and the complete read trace.
+- `files/<relative source filename>/00.jpeg` (etc.): extracted thumbnails, decoded with ImageIO
+  to verify readability; the JSON records decoded dimensions and SHA-256 hashes.
+- `report.json`: all file results and aggregate totals. Bad files are recorded and processing
+  continues; any file failure returns exit code 1. Zero thumbnails is valid for metadata-only files.
+
+`readCount` counts `readAt` calls, including failed attempts; `requestedBytes` counts requested
+lengths and `returnedBytes` counts actual data returned (including repeated ranges). They measure
+library I/O, not physical disk reads or OS cache misses. Timings include parsing, extraction,
+output writes and decoding in their respective stages; they are diagnostic, not a cold-disk benchmark.
+The comparison checks metadata, thumbnail descriptors, decoded dimensions and exact output hashes,
+and fails on changed results or increased aggregate I/O. Unchanged pre-existing failures remain visible.
+
+The latest measured results and per-file tradeoffs are in [BenchmarkResults.md](Tests/BenchmarkResults.md).
+
+## Test
 
 ```bash
-# Verify all installed files; download known public samples if missing.
+swift build
+swift test
+python3 Tests/test_benchmark.py
+
+# Complete local library (35 files); optional CC0 RAF samples:
 python3 Tests/download_resources.py
-# Require all 35 resources and compare extracted fields to ExifTool baselines.
-REQUIRE_ALL_RESOURCES=1 swift test --filter MetadataTests
-```
-
-Only three HEIF fixtures are bundled in Git. CI verifies and tests available fixtures;
-full local validation requires the complete library. The full metadata suite also covers
-unknown time zones, subsecond precision, cyclic/out-of-range EXIF, 64-bit QuickTime timestamps
-and zero time scales. Metadata reads for the current library are below 64 KiB per file.
-
-## RAF validation
-
-`RafReader` reads the RAF header and Fuji directory, then reads the embedded JPEG through a
-bounded view of the file. It exposes both the EXIF thumbnail and the full camera-rendered
-preview, preserving GPS and rotation. Metadata uses the active sensor crop dimensions;
-older SuperCCD cameras use preview dimensions because their diagonal sensor grid is not a
-rendered image rectangle. This extracts embedded previews, not full RAW demosaicing.
-
-The offline tests generate small RAF containers to exercise byte order, orientation, GPS,
-missing thumbnails, malformed headers, and read bounds. Eight CC0 samples from
-[raw.pixls.us](https://raw.pixls.us/) cover X-T2, X-T5 (including sports-finder crop), GFX 100,
-and FinePix S5 Pro, with uncompressed, lossless, and lossy compression. Sources and SHA-256
-checksums are recorded in `Tests/raf-samples.json`; large samples stay in ignored `build/`.
-
-```bash
 python3 Tests/download_raf_samples.py
-RAF_SAMPLE_DIR="$PWD/build/raf-samples" swift test --filter RafReaderTests
+REQUIRE_ALL_RESOURCES=1 RAF_SAMPLE_DIR="$PWD/build/raf-samples" swift test
 ```
 
-The sample test decodes every extracted JPEG, checks dimensions, and limits metadata reads
-to 64 KiB and total reads to the preview size plus 100 KiB.
+Only three HEIF fixtures are tracked. `ResourceManifest.json` records the complete local
+library, SHA-256 hashes and ExifTool baselines; missing optional resources are skipped unless
+`REQUIRE_ALL_RESOURCES=1` is set. RAF sample sources are in `Tests/raf-samples.json`.
 
-## Requirements
-
-- Swift 5.9+
-- macOS 11.0+ / iOS 14.0+
-
-## License
-
-MIT License
+MIT License.

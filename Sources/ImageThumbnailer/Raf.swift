@@ -3,7 +3,6 @@ import Foundation
 /// Fujifilm RAF container reader. Extracts camera-rendered JPEGs without decoding the sensor data.
 public final class RafReader: ImageReader {
     private let reader: Reader
-    private let readAt: (UInt64, UInt32) async throws -> Data
     private var jpegReader: JpegReader?
     private var previewOffset: UInt64 = 0
     private var previewLength: UInt32 = 0
@@ -11,7 +10,6 @@ public final class RafReader: ImageReader {
     private var metadata: Metadata?
 
     public required init(readAt: @escaping (UInt64, UInt32) async throws -> Data) {
-        self.readAt = readAt
         reader = Reader(readAt: readAt)
     }
 
@@ -50,11 +48,11 @@ public final class RafReader: ImageReader {
         guard offset >= 108, length >= 4 else { throw ImageReaderError.invalidData }
 
         // Keep every nested JPEG read inside the declared preview, including prefetches.
-        let source = readAt
+        let source = reader
         let jpeg = JpegReader { relativeOffset, requestedLength in
             guard relativeOffset < UInt64(length) else { throw ImageReaderError.invalidData }
             let available = UInt32(UInt64(length) - relativeOffset)
-            return try await source(offset + relativeOffset, min(requestedLength, available))
+            return try await source.read(at: offset + relativeOffset, length: min(requestedLength, available), readAhead: false)
         }
         let previewMetadata = try await jpeg.getMetadata()
         guard previewMetadata.width > 0, previewMetadata.height > 0 else {

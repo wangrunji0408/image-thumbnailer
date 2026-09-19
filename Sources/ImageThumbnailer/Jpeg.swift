@@ -41,7 +41,7 @@ public class JpegReader: ImageReader {
             try await loadMetadata()
         }
 
-        guard let entries = thumbnailEntries, index < entries.count else {
+        guard let entries = thumbnailEntries, entries.indices.contains(index) else {
             throw ImageReaderError.indexOutOfBounds
         }
 

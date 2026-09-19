@@ -42,7 +42,7 @@ public class Mp4Reader: ImageReader {
             try await loadMetadata()
         }
 
-        guard let infos = imageInfos, index < infos.count else {
+        guard let infos = imageInfos, infos.indices.contains(index) else {
             throw ImageReaderError.indexOutOfBounds
         }
 

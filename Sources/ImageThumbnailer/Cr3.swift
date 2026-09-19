@@ -38,7 +38,7 @@ public class Cr3Reader: ImageReader {
 
     public func getThumbnail(at index: Int) async throws -> Data {
         if thumbnailEntries == nil { try await loadMetadata() }
-        guard let entries = thumbnailEntries, index < entries.count else {
+        guard let entries = thumbnailEntries, entries.indices.contains(index) else {
             throw ImageReaderError.indexOutOfBounds
         }
         let entry = entries[index]
